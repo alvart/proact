@@ -1,0 +1,19 @@
+{
+  "dependencies": {
+    "create-react-class": "^15.6.2",
+    "react": "^16.0.0",
+    "react-dom": "^16.0.0"
+  },
+  "devDependencies": {
+    "bower": "^1.8.2",
+    "pulp": "^12.0.1",
+    "purescript-psa": "^0.5.1",
+    "purescript": "^0.11.6",
+    "rimraf": "^2.6.2"
+  },
+  "scripts": {
+    "clean": "rimraf output && rimraf .pulp-cache",
+    "browserify": "pulp browserify --src-path test --include src --to html/index.js",
+    "build": "pulp build"
+  }
+}

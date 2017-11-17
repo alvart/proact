@@ -19,7 +19,7 @@
 
 module Proact
 ( ComponentT
-, Dispatcher
+, This
 , EventComponent
 , EventHandler
 , ProComponent
@@ -159,14 +159,14 @@ instance monadEffComponentT
 
 -- | A composable representation of the underlying react `this` object. This
 -- | object should not be handled by the user directly.
-data Dispatcher fx state =
-  Dispatcher (state -> Aff fx Unit) (Aff fx state)
-  | ReactDispatcher (React.ReactThis {} state)
+data This fx state =
+  This (state -> Aff fx Unit) (Aff fx state)
+  | ReactThis (React.ReactThis {} state)
 
 -- | A type synonym for a UI component providing the user the ability to `get`,
 -- | `set` or `modify` the component state asynchronously.
 type UIComponent fx state render =
-  ComponentT state (ReaderT (Dispatcher fx state) (Aff fx)) render
+  ComponentT state (ReaderT (This fx state) (Aff fx)) render
 
 -- | Retrieves an event handler from the current UI context. Once this handler
 -- | receives an event component and an event it will trigger the action defined
@@ -176,12 +176,12 @@ eventHandler
    . UIComponent fx state (EventHandler fx state event)
 eventHandler = ask >>= pure <<< handler
   where
-  handler dispatcher component event =
+  handler this component event =
     -- TODO:
     --  Events fired simultaneously may revert the partial state of other
     --  components. The best approach to avoid this is to create a dispatcher
     --  of events that executes them synchronously (just like Flux does).
-    unsafeCoerceEff $ launchAff_ $ dispatch dispatcher component event
+    unsafeCoerceEff $ launchAff_ $ dispatch this component event
 
 -- | Using a lens to focus on a part of the state, changes the state type of a
 -- | child component so that it may be later composed and merged with its
@@ -193,17 +193,17 @@ focus
   -> UIComponent fx state1 render
 focus lens_ component = ComponentT $ lens_ profunctor
   where
-  focusDispatcher dispatcher = Dispatcher push_ read_
+  focusThis this = This push_ read_
     where
     push_ state2 =
       do
-      state1 <- read dispatcher
-      push dispatcher $ set lens_ state2 state1
+      state1 <- read this
+      push this $ set lens_ state2 state1
 
-    read_ = view lens_ <$> read dispatcher
+    read_ = view lens_ <$> read this
 
   ComponentT profunctor =
-    hoistComponentT (withReaderT focusDispatcher) component
+    hoistComponentT (withReaderT focusThis) component
 
 -- Note:
 --  Ideally, these functions should be part of an instance of the `MonadState`
@@ -268,12 +268,12 @@ spec component splashScreen state =
 
   dispatchRender uiThis this =
     do
-    let dispatcher = ReactDispatcher this
+    let this_ = ReactThis this
     -- Run the UI component and register a callback so that when the new GUI
     -- to be rendered is ready, the parent React component can be updated.
     unsafeCoerceEff
       $ runAff_ (either unsafeThrowException (syncRender uiThis))
-      $ dispatch dispatcher component dispatcher
+      $ dispatch this_ component this_
 
   -- The GUI to be rendered is the state itself of the parent component which
   -- is updated indirectly by its child. The virtual DOM will make sure to only
@@ -290,11 +290,11 @@ spec component splashScreen state =
 -- Runs a component and asynchronously return its monadic value.
 dispatch
   :: forall fx state arg a
-   . Dispatcher fx state
+   . This fx state
   -> ComponentT state (ReaderT arg (Aff fx)) a
   -> arg
   -> Aff fx a
-dispatch dispatcher (ComponentT (ProComponent iConsumer)) arg =
+dispatch this (ComponentT (ProComponent iConsumer)) arg =
   tailRecM consumerStep iConsumer
   where
   consumerStep consumer =
@@ -305,7 +305,7 @@ dispatch dispatcher (ComponentT (ProComponent iConsumer)) arg =
       Left a -> pure $ Done a
       Right (Await awaitNext) ->
         do
-        state <- read dispatcher
+        state <- read this
         pure $ Loop $ awaitNext state
 
   producerStep producer =
@@ -316,7 +316,7 @@ dispatch dispatcher (ComponentT (ProComponent iConsumer)) arg =
       Left a -> pure $ Done a
       Right (Emit state next) ->
         do
-        push dispatcher state
+        push this state
         pure $ Loop next
 
 -- Changes the underlying monadic context of a component.
@@ -329,9 +329,9 @@ hoistComponentT hoistFunc (ComponentT (ProComponent consumer)) =
 
 -- An abstraction of the `React.writeState` function exposing an asynchronous
 -- facade.
-push :: forall fx state . Dispatcher fx state -> state -> Aff fx Unit
-push (Dispatcher push_ _) state = push_ state
-push (ReactDispatcher this) state = makeAff push_
+push :: forall fx state . This fx state -> state -> Aff fx Unit
+push (This push_ _) state = push_ state
+push (ReactThis this) state = makeAff push_
   where
   push_ callback =
     do
@@ -345,6 +345,6 @@ push (ReactDispatcher this) state = makeAff push_
 
 -- An abstraction of the `React.readState` function exposing an asynchronous
 -- facade.
-read :: forall fx state . Dispatcher fx state -> Aff fx state
-read (Dispatcher _ read_) = read_
-read (ReactDispatcher this) = liftEff $ unsafeCoerceEff $ React.readState this
+read :: forall fx state . This fx state -> Aff fx state
+read (This _ read_) = read_
+read (ReactThis this) = liftEff $ unsafeCoerceEff $ React.readState this

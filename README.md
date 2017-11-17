@@ -44,6 +44,8 @@ Once you're app components are defined, integrate them simply and elegantly by `
 
 More examples supporting more complex scenarios coming soon!
 
+### Single component
+
 ```purescript
 -- Counter.purs
 
@@ -67,4 +69,45 @@ clickCounter =
       [ R.div' [R.text ("# clicks: " <> show counter)]
       , R.button [R.onClick (handler onClick)] [R.text "Increment"]
       ]
+```
+
+### Two-layer component
+
+```purescript
+-- App.purs
+
+import Prelude
+import Proact as P
+import React.DOM as R
+
+type GlobalState =
+  { counter :: Int
+  }
+
+_counter :: Lens' GlobalState Int
+_counter = lens _.counter (_ { counter = _ })
+
+global :: forall fx . P.UIComponent fx GlobalState R.ReactElement
+global =
+  do
+  clickDisplay <- P.focus _counter clickCounter
+  pure $ display clickDisplay
+  where
+  display clickDisplay = R.div' clickDisplay
+
+type CounterState = Int
+
+clickCounter :: forall fx . P.UIComponent fx CounterState (Array R.ReactElement)
+clickCounter =
+  do
+  counter <- P.get
+  handler <- P.eventHandler
+  pure $ display counter handler
+  where
+  onClick = P.modify (_ + 1)
+
+  display counter handler =
+    [ R.div' [R.text $ "# clicks: " <> show counter]
+    , R.button [R.onClick $ handler onClick] [R.text "Increment"]
+    ]
 ```

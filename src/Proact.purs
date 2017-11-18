@@ -39,14 +39,15 @@ import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler, runAff_)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Exception.Unsafe (unsafeThrowException)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
-import Control.Monad.Free.Trans (bimapFreeT, hoistFreeT, interpret, resume)
+import Control.Monad.Free.Trans
+  (bimapFreeT, freeT, hoistFreeT, interpret, resume)
 import Control.Monad.Reader.Class (class MonadAsk, ask)
 import Control.Monad.Reader.Trans (ReaderT, runReaderT, withReaderT)
 import Control.Monad.Rec.Class (Step(..), tailRecM)
 import Control.Monad.Trans.Class (class MonadTrans, lift)
 import Data.Either (Either(..), either)
 import Data.Bifunctor (lmap) as B
-import Data.Profunctor (class Profunctor, dimap, lmap)
+import Data.Profunctor (class Profunctor, lmap)
 import Data.Profunctor.Strong (class Strong)
 import Data.Lens (Lens', view, set)
 import Data.Tuple (Tuple(..), fst, snd)
@@ -54,6 +55,7 @@ import DOM.Node.Document (createElement) as DOM
 import DOM.HTML (window) as DOM
 import DOM.HTML.Types (htmlDocumentToDocument) as DOM
 import DOM.HTML.Window (document) as DOM
+import Partial.Unsafe (unsafePartial)
 import Prelude
 import React
   ( EventHandlerContext
@@ -87,35 +89,18 @@ type EventHandler fx state event =
 
 -- | A component representation of the profunctor and strong classes.
 newtype ProComponent m a in_ out =
-  ProComponent (Consumer in_ (Producer out m) a)
+  ProComponent (Producer out (Consumer in_ m) a)
 
 instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
   where
-  dimap f g (ProComponent consumer) =
-    ProComponent $ bimapFreeT (lmap f) (interpret (B.lmap g)) consumer
+  dimap f g (ProComponent producer) =
+    ProComponent $ bimapFreeT (B.lmap g) (interpret (lmap f)) producer
 
--- Force an await before resuming the component process to retrieve the external
--- context, then for every emit relay this data which is assumed to not have
--- changed during the co-routine execution.
-
--- TODO:
---  At the moment this assumption is incorrect and a dispatching queue needs
---  to be implemented.
 instance strongProComponent :: (Monad m) => Strong (ProComponent m r)
   where
-  first component =
-    ProComponent
-      do
-      Tuple _ a <- await
-      let ProComponent consumer = dimap fst (flip Tuple a) component
-      consumer
+  first component = strong snd (flip Tuple) $ lmap fst component
 
-  second component =
-    ProComponent
-      do
-      Tuple a _ <- await
-      let ProComponent consumer = dimap snd (Tuple a) component
-      consumer
+  second component = strong fst Tuple $ lmap snd component
 
 -- | A monadic representation of the component exposing a cleaner interface to
 -- | the user.
@@ -177,10 +162,6 @@ eventHandler
 eventHandler = ask >>= pure <<< handler
   where
   handler this component event =
-    -- TODO:
-    --  Events fired simultaneously may revert the partial state of other
-    --  components. The best approach to avoid this is to create a dispatcher
-    --  of events that executes them synchronously (just like Flux does).
     unsafeCoerceEff $ launchAff_ $ dispatch this component event
 
 -- | Using a lens to focus on a part of the state, changes the state type of a
@@ -213,7 +194,7 @@ focus lens_ component = ComponentT $ lens_ profunctor
 --  Therefore, I'm providing these abstractions separately within this API.
 -- | Gets the state of the component.
 get :: forall m state . (Monad m) => ComponentT state m state
-get = ComponentT $ ProComponent await
+get = ComponentT $ ProComponent $ lift await
 
 -- | Get the state of the component but apply a transformation function first.
 gets :: forall m state a . (Monad m) => (state -> a) -> ComponentT state m a
@@ -226,7 +207,7 @@ modify f = gets f >>= put
 
 -- | Sets the state of the component.
 put :: forall m state . (Monad m) => state -> ComponentT state m Unit
-put state = ComponentT $ ProComponent $ lift $ emit state
+put state = ComponentT $ ProComponent $ emit state
 
 -- | Creates a `ReactSpec` from a UI component starting from an initial state of
 -- | the component and rendering a default "splash screen" provided by the
@@ -294,12 +275,12 @@ dispatch
   -> ComponentT state (ReaderT arg (Aff fx)) a
   -> arg
   -> Aff fx a
-dispatch this (ComponentT (ProComponent iConsumer)) arg =
-  tailRecM consumerStep iConsumer
+dispatch this (ComponentT (ProComponent iProducer)) arg =
+  tailRecM producerStep iProducer
   where
   consumerStep consumer =
     do
-    step <- tailRecM producerStep $ resume consumer
+    step <- resume consumer `runReaderT` arg
     case step
       of
       Left a -> pure $ Done a
@@ -310,7 +291,7 @@ dispatch this (ComponentT (ProComponent iConsumer)) arg =
 
   producerStep producer =
     do
-    step <- resume producer `runReaderT` arg
+    step <- tailRecM consumerStep $ resume producer
     case step
       of
       Left a -> pure $ Done a
@@ -348,3 +329,30 @@ push (ReactThis this) state = makeAff push_
 read :: forall fx state . This fx state -> Aff fx state
 read (This _ read_) = read_
 read (ReactThis this) = liftEff $ unsafeCoerceEff $ React.readState this
+
+-- Changes the covariant type of a profunctor component by merging it with the
+-- freshest global state.
+strong
+  :: forall m a b in_ out1 out2
+   . Monad m
+  => (in_ -> a)
+  -> (a -> out1 -> out2)
+  -> ProComponent m b in_ out1
+  -> ProComponent m b in_ out2
+strong unwrap wrap (ProComponent iProducer) =
+  ProComponent $ producerStep iProducer
+  where
+  await_ :: Producer out2 (Consumer in_ m) a
+  await_ = map unwrap $ lift await
+
+  producerStep producer =
+    (freeT <<< const <<< unsafePartial)
+      do
+      step <- resume producer
+      case step
+        of
+        Left b -> pure $ Left b
+        Right (Emit out1 next) ->
+          do
+          Left a <- resume await_
+          pure $ Right $ Emit (wrap a out1) $ producerStep next

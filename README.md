@@ -49,20 +49,21 @@ More examples supporting more complex scenarios coming soon!
 ```purescript
 -- Counter.purs
 
+import Control.Comonad (extract)
 import Prelude
 import Proact as P
 import React.DOM as R
 
-type State = Int
+type State = Additive Int
 
 clickCounter :: forall fx . P.UIComponent fx State R.ReactElement
 clickCounter =
   do
-  counter <- P.get
+  counter <- extract <$> P.get
   handler <- P.eventHandler
   pure $ display counter handler
   where
-  onClick = P.modify (_ + 1)
+  onClick = P.modify $ map (_ + 1)
 
   display counter handler =
     R.div'
@@ -71,43 +72,102 @@ clickCounter =
       ]
 ```
 
-### Two-layer component
+### Tab component
 
 ```purescript
--- App.purs
+-- Tab.purs
 
+import Control.Alt((<|>))
+import Data.Lens ((.~), (^.), (^?), Lens', Prism', lens, prism)
+import Data.Maybe (maybe)
 import Prelude
 import Proact as P
 import React.DOM as R
 
-type GlobalState =
-  { counter :: Int
+import Counter as Counter
+
+infixr 9 o as ..
+
+o :: forall a b c d. Semigroupoid a => a c d -> a b c -> a b d
+o = (<<<)
+
+data Display
+  = Page1 Counter.State
+  | Page2 Counter.State
+
+_Page1 :: Prism' Display Counter.State
+_Page1 =
+  prism Page1
+    \page ->
+      case page
+        of
+        Page1 page1 -> Right page1
+        _ -> Left page
+
+_Page2 :: Prism' Display Counter.State
+_Page2 =
+  prism Page2
+    \page ->
+      case page
+        of
+        Page2 page2 -> Right page2
+        _ -> Left page
+
+type State =
+  { display :: Display
+  , page1 :: Counter.State
+  , page2 :: Counter.State
   }
 
-_counter :: Lens' GlobalState Int
-_counter = lens _.counter (_ { counter = _ })
+_display :: Lens' State Display
+_display = lens _.display (_ { display = _ })
 
-global :: forall fx . P.UIComponent fx GlobalState R.ReactElement
-global =
+_page1 :: Lens' State Counter.State
+_page1 = lens _.page1 (_ { page1 = _ })
+
+_page2 :: Lens' State Counter.State
+_page2 = lens _.page2 (_ { page2 = _ })
+
+tab :: forall fx . P.UIComponent fx State R.ReactElement
+tab =
   do
-  clickDisplay <- P.focus _counter clickCounter
-  pure $ display clickDisplay
-  where
-  display clickDisplay = R.div' clickDisplay
-
-type CounterState = Int
-
-clickCounter :: forall fx . P.UIComponent fx CounterState (Array R.ReactElement)
-clickCounter =
-  do
-  counter <- P.get
   handler <- P.eventHandler
-  pure $ display counter handler
+  page1 <- P.focus _display $ P.choose _Page1 counter
+  page2 <- P.focus _display $ P.choose _Page2 counter
+  pure $ display handler (page1 <|> page2)
   where
-  onClick = P.modify (_ + 1)
-
-  display counter handler =
-    [ R.div' [R.text $ "# clicks: " <> show counter]
-    , R.button [R.onClick $ handler onClick] [R.text "Increment"]
+  display handler page =
+    R.div'
+    [
+      R.div'
+        [ R.a [R.onClick $ handler goPage1] [R.text "Page 1"]
+        , R.text " "
+        , R.a [R.onClick $ handler goPage2] [R.text "Page 2"]
+        ]
+    , R.div' page
     ]
+
+  goPage1 =
+    do
+    state <- P.get
+
+    -- Backup the page that will be displaced from the view.
+    let page2 = state ^? _display .. _Page2
+    P.modify $ maybe id (_page2 .~ _) page2
+
+    -- Switch the view to the new page.
+    let page1 = state ^. _page1
+    P.modify $ _display .~ Page1 page1
+
+  goPage2 =
+    do
+    state <- P.get
+
+    -- Backup the page that will be displaced from the view.
+    let page1 = state ^? _display .. _Page1
+    P.modify $ maybe id (_page1 .~ _) page1
+
+    -- Switch the view to the new page.
+    let page2 = state ^. _page2
+    P.modify $ _display .~ Page2 page2
 ```

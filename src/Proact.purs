@@ -24,6 +24,7 @@ module Proact
 , EventHandler
 , ProComponent
 , UIComponent
+, choose
 , spec
 , eventHandler
 , focus
@@ -43,13 +44,16 @@ import Control.Monad.Free.Trans
   (bimapFreeT, freeT, hoistFreeT, interpret, resume)
 import Control.Monad.Reader.Class (class MonadAsk, ask)
 import Control.Monad.Reader.Trans (ReaderT, runReaderT, withReaderT)
-import Control.Monad.Rec.Class (Step(..), tailRecM)
+import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM)
 import Control.Monad.Trans.Class (class MonadTrans, lift)
 import Data.Either (Either(..), either)
-import Data.Bifunctor (lmap) as B
-import Data.Profunctor (class Profunctor, lmap)
+import Data.Bifunctor (lmap, rmap) as B
+import Data.Monoid (class Monoid, mempty)
+import Data.Newtype (class Newtype) as N
+import Data.Profunctor (class Profunctor, lmap, rmap)
+import Data.Profunctor.Choice (class Choice)
 import Data.Profunctor.Strong (class Strong)
-import Data.Lens (Lens', view, set)
+import Data.Lens (Lens', Prism', set, view)
 import Data.Tuple (Tuple(..), fst, snd)
 import DOM.Node.Document (createElement) as DOM
 import DOM.HTML (window) as DOM
@@ -72,7 +76,6 @@ import React
   as React
 import React.DOM (text) as React
 import ReactDOM (render) as React
-import Unsafe.Coerce (unsafeCoerce)
 
 -- | A type synonym for an event handler component. The user may request an
 -- | event object by `ask`ing for one (the component instantiates the `MonadAsk`
@@ -87,7 +90,7 @@ type EventHandler fx state event =
   -> event
   -> React.EventHandlerContext fx {} state Unit
 
--- | A component representation of the profunctor and strong classes.
+-- | A component representation of the Profunctor, Strong and Choice classes.
 newtype ProComponent m a in_ out =
   ProComponent (Producer out (Consumer in_ m) a)
 
@@ -96,15 +99,32 @@ instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
   dimap f g (ProComponent producer) =
     ProComponent $ bimapFreeT (B.lmap g) (interpret (lmap f)) producer
 
-instance strongProComponent :: (Monad m) => Strong (ProComponent m r)
+instance strongProComponent :: (Monad m) => Strong (ProComponent m a)
   where
   first component = strong snd (flip Tuple) $ lmap fst component
 
   second component = strong fst Tuple $ lmap snd component
 
+instance choiceProComponent
+  :: (Monad m, MonadRec m, Monoid a) => Choice (ProComponent m a)
+  where
+  left (ProComponent component) =
+    choice selectLeft $ rmap Left $ ProComponent $ map Right component
+    where
+    selectLeft (Await awaitNext) (Left in1) = awaitNext in1
+    selectLeft _ (Right a) = pure $ Left $ Left (Right a)
+
+  right (ProComponent component) =
+    choice selectLeft $ rmap Right $ ProComponent $ map Right component
+    where
+    selectLeft (Await awaitNext) (Right in1) = awaitNext in1
+    selectLeft _ (Left a) = pure $ Left $ Left (Left a)
+
 -- | A monadic representation of the component exposing a cleaner interface to
 -- | the user.
 newtype ComponentT state m a = ComponentT (ProComponent m a state state)
+
+derive instance newtypeComponentT :: N.Newtype (ComponentT state m a) _
 
 instance functorComponentT :: (Functor m) => Functor (ComponentT state m)
   where
@@ -153,6 +173,33 @@ data This fx state =
 type UIComponent fx state render =
   ComponentT state (ReaderT (This fx state) (Aff fx)) render
 
+-- | Using a prism and assuming a part of the state is of sum type, selects the
+-- | component that matches the actual type of the state or returns a `mempty`
+-- | render.
+-- | Whenever a delay event tries to read from or write to its component state,
+-- | if it's no longer selected it will instead perform the operation on a
+-- | `mempty` state.
+choose
+  :: forall fx state1 state2 render
+   . Monoid render
+  => Monoid state2
+  => Prism' state1 state2
+  -> UIComponent fx state2 render
+  -> UIComponent fx state1 render
+choose prism_ component = ComponentT $ prism_ profunctor
+  where
+  focusThis this = This push_ read_
+    where
+    push_ state1 =
+      do
+      state2 <- read this
+      push this $ set prism_ state1 state2
+
+    read_ = view prism_ <$> read this
+
+  ComponentT profunctor =
+    hoistComponentT (withReaderT focusThis) component
+
 -- | Retrieves an event handler from the current UI context. Once this handler
 -- | receives an event component and an event it will trigger the action defined
 -- | in the event component logic.
@@ -176,10 +223,10 @@ focus lens_ component = ComponentT $ lens_ profunctor
   where
   focusThis this = This push_ read_
     where
-    push_ state2 =
+    push_ state1 =
       do
-      state1 <- read this
-      push this $ set lens_ state2 state1
+      state2 <- read this
+      push this $ set lens_ state1 state2
 
     read_ = view lens_ <$> read this
 
@@ -268,17 +315,80 @@ spec component splashScreen state =
   -- GUI.
   syncRender uiThis = void <<< unsafeCoerceEff <<< React.writeState uiThis
 
--- Runs a component and asynchronously return its monadic value.
+-- A type synonym for the inner consumer co-routine of a producer/consumer
+-- stack.
+type InnerConsumer m a in_ out =
+  Consumer
+    in_
+    m
+    (
+      Either
+        (Either out a)
+        (Emit out (Producer out (Consumer in_ m) (Either out a)))
+    )
+
+-- Changes the contravariant type of a producer/consumer stack by giving the
+-- caller a choice on how to deal with the new input type. The last execution
+-- step signals the mismatched value that should be yielded before returning
+-- a `mempty` result.
+choice
+  :: forall m a in1 in2 out
+   . Monoid a
+  => Monad m
+  => MonadRec m
+  =>
+     (  Await in1 (InnerConsumer m a in1 out)
+     -> in2
+     -> InnerConsumer m a in1 out
+     )
+  -> ProComponent m (Either out a) in1 out
+  -> ProComponent m a in2 out
+choice select (ProComponent component) =
+  ProComponent $ stepOutProducer $ stepInProducer component
+  where
+  stepConsumer consumer =
+    (freeT <<< const)
+      do
+      step <- resume consumer
+      case step
+        of
+        Left producerStep ->
+          pure $ Left $ B.rmap (map stepInProducer) producerStep
+        Right awaitNext ->
+          pure $ Right $ Await $ stepConsumer <<< select awaitNext
+
+  stepOutProducer producer =
+    (freeT <<< const)
+      do
+      step <- resume producer
+      case step
+        of
+        Left tail ->
+          case tail
+            of
+            -- NOTE:
+            --  Following the example of Function as an instance of a Choice
+            --  Profunctor, I should yield the mismatched value before closing
+            --  the co-routine. However, doing so triggers an infinite loop (I
+            --  don't know why!) and not doing so seems to work fine so for now
+            --  I won't yield the mismatched value.
+            Left _ -> pure $ Left mempty
+            Right a -> pure $ Left a
+        Right (Emit out next) -> pure $ Right $ Emit out $ stepOutProducer next
+
+  stepInProducer producer = freeT $ const $ stepConsumer $ resume producer
+
+-- Runs a component and asynchronously returns its monadic value.
 dispatch
   :: forall fx state arg a
    . This fx state
   -> ComponentT state (ReaderT arg (Aff fx)) a
   -> arg
   -> Aff fx a
-dispatch this (ComponentT (ProComponent iProducer)) arg =
-  tailRecM producerStep iProducer
+dispatch this (ComponentT (ProComponent component)) arg =
+  tailRecM stepProducer component
   where
-  consumerStep consumer =
+  stepConsumer consumer =
     do
     step <- resume consumer `runReaderT` arg
     case step
@@ -289,9 +399,9 @@ dispatch this (ComponentT (ProComponent iProducer)) arg =
         state <- read this
         pure $ Loop $ awaitNext state
 
-  producerStep producer =
+  stepProducer producer =
     do
-    step <- tailRecM consumerStep $ resume producer
+    step <- tailRecM stepConsumer $ resume producer
     case step
       of
       Left a -> pure $ Done a
@@ -318,7 +428,7 @@ push (ReactThis this) state = makeAff push_
     do
     void
       $ unsafeCoerceEff
-      $ React.writeStateWithCallback this (unsafeCoerce state)
+      $ React.writeStateWithCallback this state
       $ unsafeCoerceEff
       $ callback
       $ Right unit
@@ -339,13 +449,13 @@ strong
   -> (a -> out1 -> out2)
   -> ProComponent m b in_ out1
   -> ProComponent m b in_ out2
-strong unwrap wrap (ProComponent iProducer) =
-  ProComponent $ producerStep iProducer
+strong unwrap wrap (ProComponent component) =
+  ProComponent $ stepProducer component
   where
   await_ :: Producer out2 (Consumer in_ m) a
   await_ = map unwrap $ lift await
 
-  producerStep producer =
+  stepProducer producer =
     (freeT <<< const <<< unsafePartial)
       do
       step <- resume producer
@@ -355,4 +465,4 @@ strong unwrap wrap (ProComponent iProducer) =
         Right (Emit out1 next) ->
           do
           Left a <- resume await_
-          pure $ Right $ Emit (wrap a out1) $ producerStep next
+          pure $ Right $ Emit (wrap a out1) $ stepProducer next

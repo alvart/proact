@@ -1,10 +1,10 @@
 ## Proact
 
-Proact is a model-view-dispatcher web framework on top of `purescript-react`.
+Proact is an event driven web framework on top of `purescript-react`.
 
-It exposes a clean monadic API to construct and compose components and to define event handlers with minimal code overhead. Unlike other dispatch architectures that use messages to communicate components, Proact dispatches event actions themselves which means there is less boilerplate code and more rapid development.
+It allows the user to define and encapsulate components in Monads and later compose them using profunctor lenses, prisms and traversals. Actions performing on the components' states are handled by event listeners which in turn are attached to native HTML controls.
 
-The components work on an underlying asynchronous layer which allows for cleaner asynchronous code but has the side effect that the rendering of the component will be delayed. Because of this, the user is encouraged to provide a "splash screen" that will show while the component loads the actual GUI.
+The components work on the Aff monad context which allows for cleaner asynchronous code. This, however, has the side effect that the rendering of the component will be delayed and because of this, the user is encouraged to provide a "splash screen" to be shown while the component loads the actual GUI.
 
 ## Installation
 ```sh
@@ -138,14 +138,14 @@ tab =
   where
   display handler page =
     R.div'
-    [
-      R.div'
-        [ R.a [R.onClick $ handler goPage1] [R.text "Page 1"]
-        , R.text " "
-        , R.a [R.onClick $ handler goPage2] [R.text "Page 2"]
-        ]
-    , R.div' page
-    ]
+      [
+        R.div'
+          [ R.a [R.onClick $ handler goPage1] [R.text "Page 1"]
+          , R.text " "
+          , R.a [R.onClick $ handler goPage2] [R.text "Page 2"]
+          ]
+      , R.div' page
+      ]
 
   goPage1 =
     do

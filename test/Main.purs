@@ -7,13 +7,13 @@ module Main
 where
 
 import Control.Alt((<|>))
-import Control.Comonad (extract)
 import Control.Monad.Eff (Eff)
-import Data.Lens ((.~), (^.), (^?), Lens', Prism', lens, prism)
+import Data.Array (singleton)
+import Data.Lens ((.~), (^.), (^?), Iso', Lens', Prism', iso, lens, prism)
 import Data.Either (Either(..))
 import Data.Maybe (fromJust, maybe)
-import Data.Monoid (mempty)
-import Data.Monoid.Additive (Additive)
+import Data.Monoid (class Monoid, mempty)
+import Data.Newtype (class Newtype, wrap, unwrap)
 import DOM (DOM)
 import DOM.HTML (window) as D
 import DOM.HTML.Window (document) as D
@@ -42,7 +42,38 @@ infixr 9 o as ..
 o :: forall a b c d. Semigroupoid a => a c d -> a b c -> a b d
 o = (<<<)
 
-type CounterState = Additive Int
+newIso :: forall s a . Newtype s a => Iso' s a
+newIso = iso unwrap wrap
+
+type CounterState' = Int
+
+newtype CounterState = CounterState CounterState'
+
+derive instance newtypeComponentT :: Newtype (CounterState) _
+
+instance semigroupCounterState :: Semigroup (CounterState)
+  where
+  append _ _ = mempty
+
+instance monoidCounterState :: Monoid (CounterState)
+  where
+  mempty = CounterState 0
+
+counter :: forall fx . P.UIComponent fx CounterState R.ReactElement
+counter =
+  (P.mirror newIso)
+    do
+    clicks <- P.get
+    handler <- P.eventHandler
+    pure $ display clicks handler
+  where
+  display clicks handler =
+    R.div'
+      [ R.div' [R.text $ "# clicks: " <> show clicks]
+      , R.button [R.onClick $ handler onClick] [R.text "Increment"]
+      ]
+
+  onClick = P.modify (_ + 1)
 
 data DisplayState
   = Page1 CounterState
@@ -81,26 +112,13 @@ _page1 = lens _.page1 (_ { page1 = _ })
 _page2 :: Lens' GlobalState CounterState
 _page2 = lens _.page2 (_ { page2 = _ })
 
-counter :: forall fx . P.UIComponent fx CounterState (Array R.ReactElement)
-counter =
-  do
-  clicks <- extract <$> P.get
-  handler <- P.eventHandler
-  pure $ display clicks handler
-  where
-  display clicks handler =
-    [ R.div' [R.text $ "# clicks: " <> show clicks]
-    , R.button [R.onClick $ handler onClick] [R.text "Increment"]
-    ]
-
-  onClick = P.modify $ map (_ + 1)
-
 global :: forall fx . P.UIComponent fx GlobalState R.ReactElement
 global =
   do
   handler <- P.eventHandler
-  page1 <- P.focus _display $ P.choose _Page1 counter
-  page2 <- P.focus _display $ P.choose _Page2 counter
+  let counter_ = map singleton counter
+  page1 <- P.focus _display $ P.choose _Page1 counter_
+  page2 <- P.focus _display $ P.choose _Page2 counter_
   pure $ display handler (page1 <|> page2)
   where
   display handler page =

@@ -9,7 +9,8 @@ where
 import Control.Alt((<|>))
 import Control.Monad.Eff (Eff)
 import Data.Array (singleton)
-import Data.Lens ((.~), (^.), (^?), Iso', Lens', Prism', iso, lens, prism)
+import Data.Lens
+  ((.~), (^.), (^?), Iso', Lens', Prism', iso, lens, prism)
 import Data.Either (Either(..))
 import Data.Maybe (fromJust, maybe)
 import Data.Monoid (class Monoid, mempty)
@@ -42,14 +43,14 @@ infixr 9 o as ..
 o :: forall a b c d. Semigroupoid a => a c d -> a b c -> a b d
 o = (<<<)
 
-newIso :: forall s a . Newtype s a => Iso' s a
-newIso = iso unwrap wrap
+_new :: forall s a . Newtype s a => Iso' s a
+_new = iso unwrap wrap
 
 type CounterState' = Int
 
 newtype CounterState = CounterState CounterState'
 
-derive instance newtypeComponentT :: Newtype (CounterState) _
+derive instance newtypeCounterState :: Newtype (CounterState) _
 
 instance semigroupCounterState :: Semigroup (CounterState)
   where
@@ -61,7 +62,7 @@ instance monoidCounterState :: Monoid (CounterState)
 
 counter :: forall fx . P.UIComponent fx CounterState R.ReactElement
 counter =
-  (P.mirror newIso)
+  (P.mirror _new)
     do
     clicks <- P.get
     handler <- P.eventHandler
@@ -97,40 +98,58 @@ _Page2 =
         Page2 page2 -> Right page2
         _ -> Left page
 
-type GlobalState =
+type TabState' =
   { display :: DisplayState
   , page1 :: CounterState
   , page2 :: CounterState
   }
 
-_display :: Lens' GlobalState DisplayState
+newtype TabState = TabState TabState'
+
+derive instance newtypeTabState :: Newtype (TabState) _
+
+instance semigroupTabState :: Semigroup (TabState)
+  where
+  append _ _ = mempty
+
+instance monoidTabState :: Monoid (TabState)
+  where
+  mempty =
+    TabState
+      { display : Page1 mempty
+      , page1 : mempty
+      , page2 : mempty
+      }
+
+_display :: Lens' TabState' DisplayState
 _display = lens _.display (_ { display = _ })
 
-_page1 :: Lens' GlobalState CounterState
+_page1 :: Lens' TabState' CounterState
 _page1 = lens _.page1 (_ { page1 = _ })
 
-_page2 :: Lens' GlobalState CounterState
+_page2 :: Lens' TabState' CounterState
 _page2 = lens _.page2 (_ { page2 = _ })
 
-global :: forall fx . P.UIComponent fx GlobalState R.ReactElement
-global =
-  do
-  handler <- P.eventHandler
-  let counter_ = map singleton counter
-  page1 <- P.focus _display $ P.choose _Page1 counter_
-  page2 <- P.focus _display $ P.choose _Page2 counter_
-  pure $ display handler (page1 <|> page2)
+tab :: forall fx . P.UIComponent fx TabState R.ReactElement
+tab =
+  (P.mirror _new)
+    do
+    handler <- P.eventHandler
+    let counter_ = map singleton counter
+    page1 <- P.focus _display $ P.choose _Page1 counter_
+    --page2 <- P.focus _display $ P.choose _Page2 counter_
+    pure $ display handler page1
   where
   display handler page =
     R.div'
-    [
-      R.div'
-        [ R.a [R.onClick $ handler goPage1] [R.text "Page 1"]
-        , R.text " "
-        , R.a [R.onClick $ handler goPage2] [R.text "Page 2"]
-        ]
-    , R.div' page
-    ]
+      [
+        R.div'
+          [ R.a [R.onClick $ handler goPage1] [R.text "Page 1"]
+          , R.text " "
+          , R.a [R.onClick $ handler goPage2] [R.text "Page 2"]
+          ]
+      , R.div' page
+      ]
 
   goPage1 =
     do
@@ -156,28 +175,21 @@ global =
     let page2 = state ^. _page2
     P.modify $ _display .~ Page2 page2
 
-main
-  ::
-    Eff
-      ( dom :: DOM
-      , props :: R.ReactProps
-      , refs :: R.ReactRefs R.ReadOnly
-      , state :: R.ReactState R.ReadWrite
-      )
-      Unit
+type ReactFx =
+  ( dom :: DOM
+  , props :: R.ReactProps
+  , refs :: R.ReactRefs R.ReadOnly
+  , state :: R.ReactState R.ReadWrite
+  )
+
+main :: Eff ReactFx Unit
 main =
   unsafePartial
     do
-    let spec = P.spec global splashScreen iState
+    let spec = P.spec tab splashScreen mempty
     let element = flip R.createFactory {} $ R.createClass spec
     refDocument <- map D.htmlDocumentToParentNode $ D.window >>= D.document
     refApp <- fromJust <$> D.querySelector (D.QuerySelector "#app") refDocument
     void $ R.render element refApp
   where
-  iState =
-    { display : Page1 mempty
-    , page1 : mempty
-    , page2 : mempty
-    }
-
   splashScreen = R.text ""

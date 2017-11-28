@@ -4,7 +4,7 @@ Proact is an event driven web framework on top of `purescript-react`.
 
 It allows the user to define and encapsulate components in Monads and later compose them using profunctor lenses, prisms and traversals. Actions performing on the components' states are handled by event listeners which in turn are attached to native HTML controls.
 
-The components work on the Aff monad context which allows for cleaner asynchronous code. This, however, has the side effect that the rendering of the component will be delayed and because of this, the user is encouraged to provide a "splash screen" to be shown while the component loads the actual GUI.
+The components work on the Aff monad context which allows for cleaner asynchronous code. This, however, has the side effect that the rendering of the component will be asynchronous itself, therefore, the user is encouraged to provide a "splash screen" to be shown while the component loads the actual GUI.
 
 ## Installation
 ```sh
@@ -49,21 +49,20 @@ More examples supporting more complex scenarios coming soon!
 ```purescript
 -- Counter.purs
 
-import Control.Comonad (extract)
 import Prelude
 import Proact as P
 import React.DOM as R
 
-type State = Additive Int
+type State = Int
 
 clickCounter :: forall fx . P.UIComponent fx State R.ReactElement
 clickCounter =
   do
-  counter <- extract <$> P.get
+  counter <- P.get
   handler <- P.eventHandler
   pure $ display counter handler
   where
-  onClick = P.modify $ map (_ + 1)
+  onClick = P.modify (_ + 1)
 
   display counter handler =
     R.div'
@@ -78,6 +77,7 @@ clickCounter =
 -- Tab.purs
 
 import Control.Alt((<|>))
+import Data.Array (singleton)
 import Data.Lens ((.~), (^.), (^?), Lens', Prism', lens, prism)
 import Data.Maybe (maybe)
 import Prelude
@@ -132,8 +132,9 @@ tab :: forall fx . P.UIComponent fx State R.ReactElement
 tab =
   do
   handler <- P.eventHandler
-  page1 <- P.focus _display $ P.choose _Page1 counter
-  page2 <- P.focus _display $ P.choose _Page2 counter
+  let counter_ = map singleton counter
+  page1 <- P.focus _display $ P.choose _Page1 counter_
+  page2 <- P.focus _display $ P.choose _Page2 counter_
   pure $ display handler (page1 <|> page2)
   where
   display handler page =

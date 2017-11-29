@@ -18,25 +18,28 @@
 -- | actual GUI.
 
 module Proact
-( ComponentT
-, This
+( Action
+, ComponentT
 , EventComponent
 , EventHandler
+, EventHandlerContext
 , ProComponent
+, This
 , UIComponent
-, choose
-, spec
 , eventHandler
 , focus
 , get
 , gets
 , modify
 , put
+, spec
+, swap
 )
 where
 
 import Control.Coroutine (Consumer, Producer, Await(..), Emit(..), await, emit)
 import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler, runAff_)
+import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Exception.Unsafe (unsafeThrowException)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
@@ -45,15 +48,21 @@ import Control.Monad.Free.Trans
 import Control.Monad.Reader.Class (class MonadAsk, ask)
 import Control.Monad.Reader.Trans (ReaderT, runReaderT, withReaderT)
 import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM)
+import Control.Monad.Rec.Loops (whileM_)
+import Control.Monad.State (evalStateT, execStateT)
+import Control.Monad.State (get, gets, modify, put) as S
 import Control.Monad.Trans.Class (class MonadTrans, lift)
-import Data.Either (Either(..), either)
+import Control.Monad.Writer (runWriterT, tell)
+import Data.Array.Partial (head, tail)
 import Data.Bifunctor (lmap, rmap) as B
+import Data.Either (Either(..), either, fromLeft, isRight)
+import Data.Foldable (any, fold)
 import Data.Monoid (class Monoid, mempty)
-import Data.Newtype (class Newtype) as N
+import Data.Newtype (class Newtype)
 import Data.Profunctor (class Profunctor, lmap, rmap)
 import Data.Profunctor.Choice (class Choice)
 import Data.Profunctor.Strong (class Strong)
-import Data.Lens (Lens', Prism', set, view)
+import Data.Lens (class Wander, Iso', Traversal', set, view)
 import Data.Tuple (Tuple(..), fst, snd)
 import DOM.Node.Document (createElement) as DOM
 import DOM.HTML (window) as DOM
@@ -62,10 +71,14 @@ import DOM.HTML.Window (document) as DOM
 import Partial.Unsafe (unsafePartial)
 import Prelude
 import React
-  ( EventHandlerContext
-  , ReactElement
+  ( ReactElement
+  , ReactProps
+  , ReactRefs
   , ReactSpec
+  , ReactState
   , ReactThis
+  , ReadOnly
+  , ReadWrite
   , createClass
   , createFactory
   , readState
@@ -77,54 +90,145 @@ import React
 import React.DOM (text) as React
 import ReactDOM (render) as React
 
--- | A type synonym for an event handler component. The user may request an
--- | event object by `ask`ing for one (the component instantiates the `MonadAsk`
--- | class. Also, in a similar way to a UI component, the user is able to `get`,
--- | `set` or `modify` the component state asynchronously.
-type EventComponent fx state event = ComponentT state (ReaderT event (Aff fx))
+-- | An monoidal representation of applicative actions appended with (*>).
+newtype Action f = Action (f Unit)
 
--- | A type synonym for an event handler that is accessible from a UI component.
--- | An event object may be provided later to trigger an event action.
-type EventHandler fx state event =
-  EventComponent fx state event Unit
-  -> event
-  -> React.EventHandlerContext fx {} state Unit
+derive instance newtypeAction :: Newtype (Action f) _
+
+instance semigroupAction :: (Apply f) => Semigroup (Action f)
+  where
+  append (Action a1) (Action a2) = Action $ a1 *> a2
+
+instance monoidAction :: (Applicative f) => Monoid (Action f)
+  where
+  mempty = Action $ pure unit
 
 -- | A component representation of the Profunctor, Strong and Choice classes.
-newtype ProComponent m a in_ out =
-  ProComponent (Producer out (Consumer in_ m) a)
+newtype ProComponent m a _in out =
+  ProComponent (Producer out (Consumer _in m) a)
 
 instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
   where
   dimap f g (ProComponent producer) =
     ProComponent $ bimapFreeT (B.lmap g) (interpret (lmap f)) producer
 
-instance strongProComponent :: (Monad m) => Strong (ProComponent m a)
+instance strongProComponent
+  :: (Monad m, MonadRec m) => Strong (ProComponent m a)
   where
-  first component = strong snd (flip Tuple) $ lmap fst component
+  first component = strong (flip Tuple <<< snd) $ lmap fst component
 
-  second component = strong fst Tuple $ lmap snd component
+  second component = strong (Tuple <<< fst) $ lmap snd component
 
 instance choiceProComponent
   :: (Monad m, MonadRec m, Monoid a) => Choice (ProComponent m a)
   where
-  left (ProComponent component) =
-    choice selectLeft $ rmap Left $ ProComponent $ map Right component
+  left (ProComponent iProducer) =
+    choice selectLeft $ rmap Left $ ProComponent $ map Right iProducer
     where
     selectLeft (Await awaitNext) (Left in1) = awaitNext in1
     selectLeft _ (Right a) = pure $ Left $ Left (Right a)
 
-  right (ProComponent component) =
-    choice selectLeft $ rmap Right $ ProComponent $ map Right component
+  right (ProComponent iProducer) =
+    choice selectLeft $ rmap Right $ ProComponent $ map Right iProducer
     where
     selectLeft (Await awaitNext) (Right in1) = awaitNext in1
     selectLeft _ (Left a) = pure $ Left $ Left (Left a)
 
+instance wanderProComponent
+  :: (Monad m, MonadRec m, Monoid a) => Wander (ProComponent m a)
+  where
+  wander traversal (ProComponent iProducer) =
+    ProComponent
+      do
+      -- Request input (a collection of states) and use it to gather the last
+      -- emitted value of every child component until its co-routine either
+      -- completes or blocks awaiting for more input.
+      in2 <- lift await
+
+      Tuple out2 pendingBlocks <-
+        lift $ lift $ runWriterT $ traversal initAwaitBlock in2
+
+      -- Yield the collection of states assembled in the last step.
+      emit out2
+
+      -- If any component is still blocked awaiting for input, request another
+      -- collection of states and repeat the initialization process that clears
+      -- the await block.
+      let anyBlockPending = S.get >>= pure <<< any isRight
+      resultList <-
+        unsafePartial
+          $ map (map (fst <<< fromLeft))
+          $ flip execStateT pendingBlocks
+          $ whileM_ anyBlockPending clearAwaitBlockList
+
+      pure $ fold resultList
+    where
+    clearAwaitBlock in1 =
+      unsafePartial
+        do
+        awaitBlock <- S.gets head
+        S.modify tail
+        lift
+          case awaitBlock
+            of
+            Left (Tuple a out1) -> tell [Left $ Tuple a out1] *> pure out1
+            Right (Await awaitNext) -> completeAwait $ awaitNext in1
+
+    clearAwaitBlockList =
+      do
+      pendingBlocks <- S.get
+      in2 <- lift $ lift await
+
+      -- For every component, if it immediately blocks awaiting for input then
+      -- use the data from the original request (the collection of states) to
+      -- progress the co-routine, otherwise return the last yielded value before
+      -- the co-routine completed or blocked.
+      -- It is assumed that each component will perform at least one yield
+      -- operation before completing or blocking.
+      Tuple out2 pendingBlocks' <-
+        lift
+          $ lift
+          $ lift
+          $ runWriterT
+          $ flip evalStateT pendingBlocks
+          $ traversal clearAwaitBlock in2
+
+      lift $ emit out2
+      S.put pendingBlocks'
+
+    completeAwait awaitBlock =
+      unsafePartial
+        do
+        Left (Right (Emit out1 next)) <- lift $ resume awaitBlock
+        completeEmit out1 next
+
+    completeEmit out1 producer =
+      unsafePartial
+        do
+        step <- lift $ resume $ resume producer
+        case step
+          of
+          Left (Left a) -> tell [Left $ Tuple a out1] *> pure out1
+          Right awaitBlock -> tell [Right awaitBlock] *> pure out1
+
+    initAwaitBlock in1 =
+      unsafePartial
+        do
+        -- Make a copy of the initial component for every input state, then if
+        -- it immediately blocks awaiting for more input use the data from the
+        -- the original request to progress the co-routine, otherwise return the
+        -- last yielded value before the co-routine completed or blocked.
+        -- It is assumed that each component will perform at least one yield
+        -- operation before completing or blocking.
+        step <- lift $ resume $ resume iProducer
+        case step
+          of
+          Left (Right (Emit out1 next)) -> completeEmit out1 next
+          Right (Await awaitNext) -> completeAwait $ awaitNext in1
+
 -- | A monadic representation of the component exposing a cleaner interface to
 -- | the user.
 newtype ComponentT state m a = ComponentT (ProComponent m a state state)
-
-derive instance newtypeComponentT :: N.Newtype (ComponentT state m a) _
 
 instance functorComponentT :: (Functor m) => Functor (ComponentT state m)
   where
@@ -162,76 +266,147 @@ instance monadEffComponentT
   where
   liftEff = lift <<< liftEff
 
+-- A type synonym for the state to be stored in the react component that besides
+-- actual stateful data includes control information to handle rendering.
+type ReactState state = { state :: state, refreshUI :: Boolean }
+
 -- | A composable representation of the underlying react `this` object. This
 -- | object should not be handled by the user directly.
 data This fx state =
   This (state -> Aff fx Unit) (Aff fx state)
-  | ReactThis (React.ReactThis {} state)
+  | ReactThis Boolean (React.ReactThis {} (ReactState state))
+
+-- | A type synonym for an event handler component. The user may request an
+-- | event object by `ask`ing for one (the component instantiates the `MonadAsk`
+-- | class. Also, in a similar way to a UI component, the user is able to `get`,
+-- | `set` or `modify` the component state asynchronously.
+type EventComponent fx state event = ComponentT state (ReaderT event (Aff fx))
+
+-- | A type synonym for effects associated to React components.
+type EventHandlerContext fx =
+  Eff
+    ( props :: React.ReactProps
+    , refs :: React.ReactRefs React.ReadOnly
+    , state :: React.ReactState React.ReadWrite
+    | fx
+    )
+
+-- | A type synonym for an event handler that is accessible from a UI component.
+-- | An event object may be provided later to trigger an event action.
+type EventHandler fx state event =
+  EventComponent fx state event Unit -> event -> Action (EventHandlerContext fx)
 
 -- | A type synonym for a UI component providing the user the ability to `get`,
 -- | `set` or `modify` the component state asynchronously.
 type UIComponent fx state render =
   ComponentT state (ReaderT (This fx state) (Aff fx)) render
 
--- | Using a prism and assuming a part of the state is of sum type, selects the
--- | component that matches the actual type of the state or returns a `mempty`
--- | render.
--- | Whenever a delay event tries to read from or write to its component state,
--- | if it's no longer selected it will instead perform the operation on a
--- | `mempty` state.
-choose
-  :: forall fx state1 state2 render
-   . Monoid render
-  => Monoid state2
-  => Prism' state1 state2
-  -> UIComponent fx state2 render
-  -> UIComponent fx state1 render
-choose prism_ component = ComponentT $ prism_ profunctor
-  where
-  focusThis this = This push_ read_
-    where
-    push_ state1 =
-      do
-      state2 <- read this
-      push this $ set prism_ state1 state2
-
-    read_ = view prism_ <$> read this
-
-  ComponentT profunctor =
-    hoistComponentT (withReaderT focusThis) component
-
 -- | Retrieves an event handler from the current UI context. Once this handler
--- | receives an event component and an event it will trigger the action defined
--- | in the event component logic.
+-- | receives an event component and an event it will trigger the actions
+-- | contained in the monadic side-effects (asynchronous).
 eventHandler
   :: forall fx state event
    . UIComponent fx state (EventHandler fx state event)
 eventHandler = ask >>= pure <<< handler
   where
   handler this component event =
-    unsafeCoerceEff $ launchAff_ $ dispatch this component event
+    Action $ unsafeCoerceEff $ launchAff_ $ dispatch this component event
 
--- | Using a lens to focus on a part of the state, changes the state type of a
--- | child component so that it may be later composed and merged with its
--- | parent.
+-- | Changes a component's state type through the lens of a traversal.
 focus
   :: forall fx state1 state2 render
-   . Lens' state1 state2
+   . Monoid state2
+  => Monoid render
+  => Traversal' state1 state2
   -> UIComponent fx state2 render
   -> UIComponent fx state1 render
-focus lens_ component = ComponentT $ lens_ profunctor
+focus traversal_ component = ComponentT $ traversal_ $ wanderify profunctor
   where
   focusThis this = This push_ read_
     where
-    push_ state1 =
+    push_ state2 =
       do
-      state2 <- read this
-      push this $ set lens_ state1 state2
+      state1 <- read this
+      push this $ set traversal_ state2 state1
 
-    read_ = view lens_ <$> read this
+    read_ = view traversal_ <$> read this
 
-  ComponentT profunctor =
-    hoistComponentT (withReaderT focusThis) component
+  wanderAwait awaitBlock state =
+    freeT \_ ->
+      do
+      -- Review the first await step.
+      step <- resume awaitBlock
+      case step
+        of
+        -- If the co-routine completes, emit the state previously read before
+        -- closing.
+        Left (Left render) -> resume $ resume $ emit state *> pure render
+
+        -- Else if the co-routine yields, follow its yield chain until
+        -- completion.
+        Left (Right (Emit state' next)) ->
+          resume $ resume $ wanderEmit state' next
+
+        -- Else (the co-routine blocks), follow its await chain until completion
+        -- ignoring the current await block.
+        Right (Await awaitNext) -> resume $ wanderAwait (awaitNext state) state
+
+  wanderEmit state producer =
+    freeT \_ -> freeT \_ ->
+      do
+      -- Review the first emit step.
+      step <- resume $ resume producer
+      case step
+        of
+        -- If the co-routine completes, emit the last state in the yield chain
+        -- before closing.
+        Left (Left render) -> resume $ resume $ emit state *> pure render
+
+        -- Else if the co-routine yields, follow its yield chain ignoring the
+        -- previous yielded value.
+        Left (Right (Emit state' next)) ->
+          resume $ resume $ wanderEmit state' next
+
+        -- Else (the co-routine blocks), emit the last state and follow the
+        -- await chain until completion.
+        Right (Await awaitNext) ->
+          (resume <<< resume)
+            do
+            emit state
+            state' <- lift await
+            freeT \_ -> wanderAwait (awaitNext state') state'
+
+  -- Adjusts the producer/consumer stack of the component to guarantee that
+  -- running wander on it will succeed.
+  -- The only restriction required for this is for the component to always yield
+  -- before completing or blocking for input (except if it blocks immediately on
+  -- its first step).
+  wanderify (ProComponent iProducer) =
+    ProComponent $ freeT \_ -> freeT \_ ->
+      do
+      -- Review the first co-routine step.
+      step <- resume $ resume iProducer
+      case step
+        of
+        -- If the co-routine completes immediately, await for a new state and
+        -- yield the received value before closing.
+        Left (Left render) ->
+          (resume <<< resume)
+            do
+            lift await >>= emit
+            pure render
+
+        -- Else if the co-routine yields immediately, await for a new state and
+        -- follow the yield chain until completion.
+        Left (Right (Emit state next)) ->
+          resume $ resume $ lift await *> wanderEmit state next
+
+        -- Else (the co-routine blocks), follow its await chain until
+        -- completion.
+        Right (Await awaitNext) ->
+          pure $ Right $ Await \state -> wanderAwait (awaitNext state) state
+
+  ComponentT profunctor = hoistComponentT (withReaderT focusThis) component
 
 -- Note:
 --  Ideally, these functions should be part of an instance of the `MonadState`
@@ -269,24 +444,26 @@ spec component splashScreen state =
   (React.spec splashScreen React.readState)
     { componentDidMount = asyncRender state }
   where
-  asyncRender state_ this =
+  asyncRender _state this =
     do
     -- Create a dummy HTML node just to trigger the effect of rendering.
-    noscript_ <- unsafeCoerceEff noscript
+    _noscript <- unsafeCoerceEff noscript
+
+    let reactState = { state : _state, refreshUI : false }
 
     -- Render a dummy React component to trigger a run of the UI component.
     -- Every time the state of the underlying React component changes, the
     -- parent (this) needs to be updated indirectly.
     unsafeCoerceEff
       $ void
-      $ flip React.render noscript_
+      $ flip React.render _noscript
       $ flip React.createFactory {}
       $ React.createClass
       $
-        (React.spec state_ $ const $ pure $ React.text "")
+        (React.spec reactState $ const $ pure $ React.text "")
           { componentDidMount = dispatchRender this
           , componentDidUpdate =
-              \stThis _ _-> unsafeCoerceEff $ stepRender this stThis
+              \stateThis _ _-> unsafeCoerceEff $ stepRender this stateThis
           }
 
   noscript =
@@ -296,69 +473,90 @@ spec component splashScreen state =
 
   dispatchRender uiThis this =
     do
-    let this_ = ReactThis this
+    let renderThis = ReactThis false this
+    let dispatcherThis = ReactThis true this
+
     -- Run the UI component and register a callback so that when the new GUI
     -- to be rendered is ready, the parent React component can be updated.
     unsafeCoerceEff
       $ runAff_ (either unsafeThrowException (syncRender uiThis))
-      $ dispatch this_ component this_
+      $ dispatch renderThis component dispatcherThis
 
   -- The GUI to be rendered is the state itself of the parent component which
   -- is updated indirectly by its child. The virtual DOM will make sure to only
   -- re-render the graphical elements that changed.
-  stepRender uiThis stThis =
+  stepRender uiThis stateThis =
     do
-    state_ <- React.readState stThis
-    asyncRender state_ uiThis
+    reactState <- React.readState stateThis
+    when (reactState.refreshUI) $ asyncRender reactState.state uiThis
 
   -- Indirectly render the parent component by re-writing its state with the new
   -- GUI.
   syncRender uiThis = void <<< unsafeCoerceEff <<< React.writeState uiThis
 
--- A type synonym for the inner consumer co-routine of a producer/consumer
--- stack.
-type InnerConsumer m a in_ out =
-  Consumer
-    in_
-    m
-    (
-      Either
-        (Either out a)
-        (Emit out (Producer out (Consumer in_ m) (Either out a)))
-    )
+-- | Changes a component's state type through the lens of an isomorphism.
+swap
+  :: forall fx state1 state2 render
+   . Iso' state1 state2
+  -> UIComponent fx state2 render
+  -> UIComponent fx state1 render
+swap _iso component = ComponentT $ _iso profunctor
+  where
+  focusThis this = This _push _read
+    where
+    _push state2 =
+      do
+      state1 <- read this
+      push this $ set _iso state2 state1
+
+    _read = view _iso <$> read this
+
+  ComponentT profunctor = hoistComponentT (withReaderT focusThis) component
+
+-- A type synonym for the consumer co-routine at the first layer of a
+-- producer/consumer stack.
+type AwaitBlock m a _in out =
+  Consumer _in m (Either a (Emit out (Producer out (Consumer _in m) a)))
+
+-- A type synonym for the consumer co-routine at the first layer of a
+-- producer/consumer stack that returns whether a Choice profunctor should yield
+-- the mismatched input type or not.
+type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
 
 -- Changes the contravariant type of a producer/consumer stack by giving the
 -- caller a choice on how to deal with the new input type. The last execution
 -- step signals the mismatched value that should be yielded before returning
 -- a `mempty` result.
+-- It is assumed that before emitting, the co-routine will at least once block
+-- for input. This is to make sure that the choice operation will have the
+-- opportunity to fail in case the input was a mismatch.
 choice
   :: forall m a in1 in2 out
    . Monoid a
   => Monad m
   => MonadRec m
   =>
-     (  Await in1 (InnerConsumer m a in1 out)
+     (  Await in1 (AwaitChoiceBlock m a in1 out)
      -> in2
-     -> InnerConsumer m a in1 out
+     -> AwaitChoiceBlock m a in1 out
      )
   -> ProComponent m (Either out a) in1 out
   -> ProComponent m a in2 out
-choice select (ProComponent component) =
-  ProComponent $ stepOutProducer $ stepInProducer component
+choice select (ProComponent iProducer) =
+  ProComponent $ stepOutProducer $ stepInProducer iProducer
   where
   stepConsumer consumer =
-    (freeT <<< const)
+    freeT \_ ->
       do
       step <- resume consumer
       case step
         of
-        Left producerStep ->
-          pure $ Left $ B.rmap (map stepInProducer) producerStep
-        Right awaitNext ->
-          pure $ Right $ Await $ stepConsumer <<< select awaitNext
+        Left emitBlock -> pure $ Left $ B.rmap (map stepInProducer) emitBlock
+        Right awaitBlock ->
+          pure $ Right $ Await $ stepConsumer <<< select awaitBlock
 
   stepOutProducer producer =
-    (freeT <<< const)
+    freeT \_ ->
       do
       step <- resume producer
       case step
@@ -366,13 +564,7 @@ choice select (ProComponent component) =
         Left tail ->
           case tail
             of
-            -- NOTE:
-            --  Following the example of Function as an instance of a Choice
-            --  Profunctor, I should yield the mismatched value before closing
-            --  the co-routine. However, doing so triggers an infinite loop (I
-            --  don't know why!) and not doing so seems to work fine so for now
-            --  I won't yield the mismatched value.
-            Left _ -> pure $ Left mempty
+            Left out -> pure $ Right $ Emit out $ pure mempty
             Right a -> pure $ Left a
         Right (Emit out next) -> pure $ Right $ Emit out $ stepOutProducer next
 
@@ -385,8 +577,8 @@ dispatch
   -> ComponentT state (ReaderT arg (Aff fx)) a
   -> arg
   -> Aff fx a
-dispatch this (ComponentT (ProComponent component)) arg =
-  tailRecM stepProducer component
+dispatch this (ComponentT (ProComponent iProducer)) arg =
+  tailRecM stepProducer iProducer
   where
   stepConsumer consumer =
     do
@@ -421,14 +613,15 @@ hoistComponentT hoistFunc (ComponentT (ProComponent consumer)) =
 -- An abstraction of the `React.writeState` function exposing an asynchronous
 -- facade.
 push :: forall fx state . This fx state -> state -> Aff fx Unit
-push (This push_ _) state = push_ state
-push (ReactThis this) state = makeAff push_
+push (This _push _) state = _push state
+push (ReactThis refreshUI this) state = makeAff _push
   where
-  push_ callback =
+  _push callback =
     do
+    let _state = { state : state, refreshUI : refreshUI }
     void
       $ unsafeCoerceEff
-      $ React.writeStateWithCallback this state
+      $ React.writeStateWithCallback this _state
       $ unsafeCoerceEff
       $ callback
       $ Right unit
@@ -437,32 +630,39 @@ push (ReactThis this) state = makeAff push_
 -- An abstraction of the `React.readState` function exposing an asynchronous
 -- facade.
 read :: forall fx state . This fx state -> Aff fx state
-read (This _ read_) = read_
-read (ReactThis this) = liftEff $ unsafeCoerceEff $ React.readState this
+read (This _ _read) = _read
+read (ReactThis _ this) =
+  map (_.state) $ liftEff $ unsafeCoerceEff $ React.readState this
 
 -- Changes the covariant type of a profunctor component by merging it with the
--- freshest global state.
+-- most recent global state.
+-- It is assumed that before emitting, the co-routine will at least once block
+-- for input. This is so that the unfocused segment of the state can be emitted.
 strong
-  :: forall m a b in_ out1 out2
+  :: forall m b _in out1 out2
    . Monad m
-  => (in_ -> a)
-  -> (a -> out1 -> out2)
-  -> ProComponent m b in_ out1
-  -> ProComponent m b in_ out2
-strong unwrap wrap (ProComponent component) =
-  ProComponent $ stepProducer component
+  => MonadRec m
+  => (_in -> out1 -> out2)
+  -> ProComponent m b _in out1
+  -> ProComponent m b _in out2
+strong emit' (ProComponent iProducer) = ProComponent $ stepProducer iProducer
   where
-  await_ :: Producer out2 (Consumer in_ m) a
-  await_ = map unwrap $ lift await
-
-  stepProducer producer =
-    (freeT <<< const <<< unsafePartial)
+  completeAwait awaitBlock _in =
+    freeT \_ -> unsafePartial
       do
-      step <- resume producer
+      step <- resume awaitBlock
       case step
         of
-        Left b -> pure $ Left b
-        Right (Emit out1 next) ->
-          do
-          Left a <- resume await_
-          pure $ Right $ Emit (wrap a out1) $ stepProducer next
+        Left (Left b) -> pure $ Left $ Left b
+        Left (Right (Emit out1 next)) ->
+          pure $ Left $ Right $ Emit (emit' _in out1) $ stepProducer next
+
+  stepProducer producer =
+    freeT \_ -> freeT \_ -> unsafePartial
+      do
+      step <- resume $ resume producer
+      case step
+        of
+        Left (Left b) -> pure $ Left $ Left b
+        Right (Await awaitNext) ->
+          pure $ Right $ Await \_in -> completeAwait (awaitNext _in) _in

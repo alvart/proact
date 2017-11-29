@@ -9,10 +9,11 @@ where
 import Control.Alt((<|>))
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception.Unsafe (unsafeThrow)
+import Control.Monad.State (get)
 import Data.Array (singleton)
 import Data.Lens
-  ( (%~)
-  , (.~)
+  ( (%=)
+  , (.=)
   , (^.)
   , (^?)
   , Iso'
@@ -24,11 +25,12 @@ import Data.Lens
   , prism
   , traversed
   )
+import Data.Lens.Iso.Newtype (_Newtype)
 import Data.Either (Either(..))
-import Data.Maybe (fromJust, maybe)
+import Data.Maybe (Maybe(..), fromJust)
 import Data.Monoid (class Monoid, mempty)
 import Data.Monoid.Additive (Additive(..))
-import Data.Newtype (class Newtype, wrap, unwrap)
+import Data.Newtype (class Newtype, unwrap)
 import DOM (DOM)
 import DOM.HTML (window) as D
 import DOM.HTML.Window (document) as D
@@ -60,8 +62,8 @@ o = (<<<)
 _additive :: forall a . Iso' (Additive a) a
 _additive = iso unwrap Additive
 
-_new :: forall s a . Newtype s a => Iso' s a
-_new = iso unwrap wrap
+_this :: forall a . Iso' a a
+_this = id
 
 unwrap2 :: forall a b c d . Newtype c d => (a -> b -> c) -> (a -> b -> d)
 unwrap2 fabc a b = unwrap $ fabc a b
@@ -70,9 +72,9 @@ type CounterState = Additive Int
 
 counter :: forall fx . P.UIComponent fx CounterState R.ReactElement
 counter =
-  (P.swap _additive)
+  (P.focus' _additive)
     do
-    clicks <- P.get
+    clicks <- get
     handler <- unwrap2 <$> P.eventHandler
     pure $ display clicks handler
   where
@@ -82,7 +84,7 @@ counter =
       , R.button [R.onClick $ handler onClick] [R.text "Increment"]
       ]
 
-  onClick = P.modify (_ + 1)
+  onClick = _this %= (_ + 1)
 
 data DisplayState
   = Page1 CounterState
@@ -123,22 +125,16 @@ instance monoidTabState :: Monoid (TabState)
       }
 
 _Page1 :: Prism' DisplayState CounterState
-_Page1 =
-  prism Page1
-    \page ->
-      case page
-        of
-        Page1 page1 -> Right page1
-        _ -> Left page
+_Page1 = prism Page1 _page
+  where
+  _page (Page1 page1) = Right page1
+  _page page = Left page
 
 _Page2 :: Prism' DisplayState CounterState
-_Page2 =
-  prism Page2
-    \page ->
-      case page
-        of
-        Page2 page2 -> Right page2
-        _ -> Left page
+_Page2 = prism Page2 _page
+  where
+  _page (Page2 page2) = Right page2
+  _page page = Left page
 
 _display :: Lens' TabState' DisplayState
 _display = lens _.display (_ { display = _ })
@@ -151,7 +147,7 @@ _page2 = lens _.page2 (_ { page2 = _ })
 
 tab :: forall fx . P.UIComponent fx TabState R.ReactElement
 tab =
-  (P.swap _new)
+  (P.focus' _Newtype)
     do
     handler <- unwrap2 <$> P.eventHandler
 
@@ -173,28 +169,30 @@ tab =
       ]
 
   goPage1 =
-    do
-    state <- P.get
+    unsafePartial
+      do
+      state <- get
 
-    -- Backup the page that will be displaced from the view.
-    let page2 = state ^? _display .. _Page2
-    P.modify $ maybe id (_page2 .~ _) page2
+      -- Backup the page that will be displaced from the view.
+      let Just page2 = state ^? _display .. _Page2
+      _page2 .= page2
 
-    -- Switch the view to the new page.
-    let page1 = state ^. _page1
-    P.modify $ _display .~ Page1 page1
+      -- Switch the view to the new page.
+      let page1 = state ^. _page1
+      _display .= Page1 page1
 
   goPage2 =
-    do
-    state <- P.get
+    unsafePartial
+      do
+      state <- get
 
-    -- Backup the page that will be displaced from the view.
-    let page1 = state ^? _display .. _Page1
-    P.modify $ maybe id (_page1 .~ _) page1
+      -- Backup the page that will be displaced from the view.
+      let Just page1 = state ^? _display .. _Page1
+      _page1 .= page1
 
-    -- Switch the view to the new page.
-    let page2 = state ^. _page2
-    P.modify $ _display .~ Page2 page2
+      -- Switch the view to the new page.
+      let page2 = state ^. _page2
+      _display .= Page2 page2
 
 type AppState' =
   { tabs :: Array TabState
@@ -204,10 +202,10 @@ _tabs :: Lens' AppState' (Array TabState)
 _tabs = lens _.tabs (_ { tabs = _ })
 
 _tabDisplayTotal :: Traversal' AppState' DisplayState
-_tabDisplayTotal = _tabs .. traversed .. _new .. _display
+_tabDisplayTotal = _tabs .. traversed .. _Newtype .. _display
 
 _tabTotal :: Traversal' AppState' TabState'
-_tabTotal = _tabs .. traversed .. _new
+_tabTotal = _tabs .. traversed .. _Newtype
 
 newtype AppState = AppState AppState'
 
@@ -226,10 +224,10 @@ instance monoidAppState :: Monoid (AppState)
 
 app :: forall fx . P.UIComponent fx AppState R.ReactElement
 app =
-  (P.swap _new)
+  (P.focus' _Newtype)
     do
-    total1 <- P.focus (_tabDisplayTotal .. _Page1) P.get
-    total2 <- P.focus (_tabDisplayTotal .. _Page2) P.get
+    total1 <- P.focus (_tabDisplayTotal .. _Page1) get
+    total2 <- P.focus (_tabDisplayTotal .. _Page2) get
 
     handler <- unwrap2 <$> P.eventHandler
     let total = unwrap $ total1 <> total2
@@ -244,11 +242,11 @@ app =
 
   onClick =
     do
-    P.modify $ _tabDisplayTotal .. _Page1 .. _additive %~ (_ + 1)
-    P.modify $ _tabDisplayTotal .. _Page2 .. _additive %~ (_ + 1)
+    _tabDisplayTotal .. _Page1 .. _additive %= (_ + 1)
+    _tabDisplayTotal .. _Page2 .. _additive %= (_ + 1)
 
-    P.modify $ _tabTotal .. _page1 .. _additive %~ (_ + 1)
-    P.modify $ _tabTotal .. _page2 .. _additive %~ (_ + 1)
+    _tabTotal .. _page1 .. _additive %= (_ + 1)
+    _tabTotal .. _page2 .. _additive %= (_ + 1)
 
 type ReactFx =
   ( dom :: DOM

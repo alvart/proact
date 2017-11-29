@@ -28,12 +28,8 @@ module Proact
 , UIComponent
 , eventHandler
 , focus
-, get
-, gets
-, modify
-, put
+, focus'
 , spec
-, swap
 )
 where
 
@@ -49,8 +45,8 @@ import Control.Monad.Reader.Class (class MonadAsk, ask)
 import Control.Monad.Reader.Trans (ReaderT, runReaderT, withReaderT)
 import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM)
 import Control.Monad.Rec.Loops (whileM_)
-import Control.Monad.State (evalStateT, execStateT)
-import Control.Monad.State (get, gets, modify, put) as S
+import Control.Monad.State
+  (class MonadState, evalStateT, execStateT, get, gets, modify, put)
 import Control.Monad.Trans.Class (class MonadTrans, lift)
 import Control.Monad.Writer (runWriterT, tell)
 import Data.Array.Partial (head, tail)
@@ -62,7 +58,7 @@ import Data.Newtype (class Newtype)
 import Data.Profunctor (class Profunctor, lmap, rmap)
 import Data.Profunctor.Choice (class Choice)
 import Data.Profunctor.Strong (class Strong)
-import Data.Lens (class Wander, Iso', Traversal', set, view)
+import Data.Lens (class Wander, Lens', Traversal', set, view)
 import Data.Tuple (Tuple(..), fst, snd)
 import DOM.Node.Document (createElement) as DOM
 import DOM.HTML (window) as DOM
@@ -154,7 +150,7 @@ instance wanderProComponent
       -- If any component is still blocked awaiting for input, request another
       -- collection of states and repeat the initialization process that clears
       -- the await block.
-      let anyBlockPending = S.get >>= pure <<< any isRight
+      let anyBlockPending = get >>= pure <<< any isRight
       resultList <-
         unsafePartial
           $ map (map (fst <<< fromLeft))
@@ -166,8 +162,8 @@ instance wanderProComponent
     clearAwaitBlock in1 =
       unsafePartial
         do
-        awaitBlock <- S.gets head
-        S.modify tail
+        awaitBlock <- gets head
+        modify tail
         lift
           case awaitBlock
             of
@@ -176,7 +172,7 @@ instance wanderProComponent
 
     clearAwaitBlockList =
       do
-      pendingBlocks <- S.get
+      pendingBlocks <- get
       in2 <- lift $ lift await
 
       -- For every component, if it immediately blocks awaiting for input then
@@ -194,7 +190,7 @@ instance wanderProComponent
           $ traversal clearAwaitBlock in2
 
       lift $ emit out2
-      S.put pendingBlocks'
+      put pendingBlocks'
 
     completeAwait awaitBlock =
       unsafePartial
@@ -266,6 +262,17 @@ instance monadEffComponentT
   where
   liftEff = lift <<< liftEff
 
+instance monadStateComponentT
+  :: (Monad m) => MonadState state (ComponentT state m)
+  where
+  state f =
+    (ComponentT <<< ProComponent)
+      do
+      _state <- lift await
+      let Tuple a state' = f _state
+      emit state'
+      pure a
+
 -- A type synonym for the state to be stored in the react component that besides
 -- actual stateful data includes control information to handle rendering.
 type ReactState state = { state :: state, refreshUI :: Boolean }
@@ -313,6 +320,7 @@ eventHandler = ask >>= pure <<< handler
     Action $ unsafeCoerceEff $ launchAff_ $ dispatch this component event
 
 -- | Changes a component's state type through the lens of a traversal.
+-- | For a less restrictive albeit less general version, consider `focus'`.
 focus
   :: forall fx state1 state2 render
    . Monoid state2
@@ -320,7 +328,7 @@ focus
   => Traversal' state1 state2
   -> UIComponent fx state2 render
   -> UIComponent fx state1 render
-focus traversal_ component = ComponentT $ traversal_ $ wanderify profunctor
+focus traversal_ component = ComponentT $ traversal_ profunctor
   where
   focusThis this = This push_ read_
     where
@@ -331,105 +339,27 @@ focus traversal_ component = ComponentT $ traversal_ $ wanderify profunctor
 
     read_ = view traversal_ <$> read this
 
-  wanderAwait awaitBlock state =
-    freeT \_ ->
-      do
-      -- Review the first await step.
-      step <- resume awaitBlock
-      case step
-        of
-        -- If the co-routine completes, emit the state previously read before
-        -- closing.
-        Left (Left render) -> resume $ resume $ emit state *> pure render
-
-        -- Else if the co-routine yields, follow its yield chain until
-        -- completion.
-        Left (Right (Emit state' next)) ->
-          resume $ resume $ wanderEmit state' next
-
-        -- Else (the co-routine blocks), follow its await chain until completion
-        -- ignoring the current await block.
-        Right (Await awaitNext) -> resume $ wanderAwait (awaitNext state) state
-
-  wanderEmit state producer =
-    freeT \_ -> freeT \_ ->
-      do
-      -- Review the first emit step.
-      step <- resume $ resume producer
-      case step
-        of
-        -- If the co-routine completes, emit the last state in the yield chain
-        -- before closing.
-        Left (Left render) -> resume $ resume $ emit state *> pure render
-
-        -- Else if the co-routine yields, follow its yield chain ignoring the
-        -- previous yielded value.
-        Left (Right (Emit state' next)) ->
-          resume $ resume $ wanderEmit state' next
-
-        -- Else (the co-routine blocks), emit the last state and follow the
-        -- await chain until completion.
-        Right (Await awaitNext) ->
-          (resume <<< resume)
-            do
-            emit state
-            state' <- lift await
-            freeT \_ -> wanderAwait (awaitNext state') state'
-
-  -- Adjusts the producer/consumer stack of the component to guarantee that
-  -- running wander on it will succeed.
-  -- The only restriction required for this is for the component to always yield
-  -- before completing or blocking for input (except if it blocks immediately on
-  -- its first step).
-  wanderify (ProComponent iProducer) =
-    ProComponent $ freeT \_ -> freeT \_ ->
-      do
-      -- Review the first co-routine step.
-      step <- resume $ resume iProducer
-      case step
-        of
-        -- If the co-routine completes immediately, await for a new state and
-        -- yield the received value before closing.
-        Left (Left render) ->
-          (resume <<< resume)
-            do
-            lift await >>= emit
-            pure render
-
-        -- Else if the co-routine yields immediately, await for a new state and
-        -- follow the yield chain until completion.
-        Left (Right (Emit state next)) ->
-          resume $ resume $ lift await *> wanderEmit state next
-
-        -- Else (the co-routine blocks), follow its await chain until
-        -- completion.
-        Right (Await awaitNext) ->
-          pure $ Right $ Await \state -> wanderAwait (awaitNext state) state
-
   ComponentT profunctor = hoistComponentT (withReaderT focusThis) component
 
--- Note:
---  Ideally, these functions should be part of an instance of the `MonadState`
---  class, however, because Purescript doesn't allow for default implementations
---  in class declarations, only the `state` function may be redefined for an
---  instance of `MonadState` which is not efficient for this implementation.
---  Therefore, I'm providing these abstractions separately within this API.
--- | Gets the state of the component.
-get :: forall m state . (Monad m) => ComponentT state m state
-get = ComponentT $ ProComponent $ lift await
+-- | Changes a component's state type through a lens.
+-- | For a more general albeit more restrictive version, consider `focus`.
+focus'
+  :: forall fx state1 state2 render
+   . Lens' state1 state2
+  -> UIComponent fx state2 render
+  -> UIComponent fx state1 render
+focus' _iso component = ComponentT $ _iso profunctor
+  where
+  focusThis this = This _push _read
+    where
+    _push state2 =
+      do
+      state1 <- read this
+      push this $ set _iso state2 state1
 
--- | Get the state of the component but apply a transformation function first.
-gets :: forall m state a . (Monad m) => (state -> a) -> ComponentT state m a
-gets f = map f get
+    _read = view _iso <$> read this
 
--- | Modifies the state of the component given a transformation function.
-modify
-  :: forall m state . (Monad m) => (state -> state) -> ComponentT state m Unit
-modify f = gets f >>= put
-
--- | Sets the state of the component.
-put :: forall m state . (Monad m) => state -> ComponentT state m Unit
-put state = ComponentT $ ProComponent $ emit state
+  ComponentT profunctor = hoistComponentT (withReaderT focusThis) component
 
 -- | Creates a `ReactSpec` from a UI component starting from an initial state of
 -- | the component and rendering a default "splash screen" provided by the
@@ -493,25 +423,6 @@ spec component splashScreen state =
   -- Indirectly render the parent component by re-writing its state with the new
   -- GUI.
   syncRender uiThis = void <<< unsafeCoerceEff <<< React.writeState uiThis
-
--- | Changes a component's state type through the lens of an isomorphism.
-swap
-  :: forall fx state1 state2 render
-   . Iso' state1 state2
-  -> UIComponent fx state2 render
-  -> UIComponent fx state1 render
-swap _iso component = ComponentT $ _iso profunctor
-  where
-  focusThis this = This _push _read
-    where
-    _push state2 =
-      do
-      state1 <- read this
-      push this $ set _iso state2 state1
-
-    _read = view _iso <$> read this
-
-  ComponentT profunctor = hoistComponentT (withReaderT focusThis) component
 
 -- A type synonym for the consumer co-routine at the first layer of a
 -- producer/consumer stack.

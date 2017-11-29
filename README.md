@@ -55,8 +55,8 @@ o = (<<<)
 _additive :: forall a . Iso' (Additive a) a
 _additive = iso unwrap Additive
 
-_new :: forall s a . Newtype s a => Iso' s a
-_new = iso unwrap wrap
+_this :: forall a . Iso' a a
+_this = id
 
 unwrap2 :: forall a b c d . Newtype c d => (a -> b -> c) -> (a -> b -> d)
 unwrap2 fabc a b = unwrap $ fabc a b
@@ -76,7 +76,7 @@ counter =
   -- We can work in our component assuming its state is an integer and wrap it
   -- at the end in the Additive Monoid, doing so makes the code cleaner and more
   -- elegant.
-  (P.swap _additive)
+  (P.focus' _additive)
     do
     -- We get the state as an integer.
     clicks <- P.get
@@ -94,7 +94,7 @@ counter =
       , R.button [R.onClick $ handler onClick] [R.text "Increment"]
       ]
 
-  onClick = P.modify (_ + 1)
+  onClick = _this %= (_ + 1)
 ```
 
 It's important to note that there are two different monadic contexts in this example: UIComponent and EventComponent. In general, it's recommended to only read the state when on the UIComponent context as this logic will be executed every time the component has its state updated (writing the state on this context won't trigger an infinite loop, though). The EventComponent context is designed to work as a reaction to control events, this is the best place to include logic that alters the state.
@@ -138,23 +138,17 @@ instance semigroupState :: Semigroup (State)
       }
 
 -- We define Prisms to query whether a specific page is selected.
-_Page1 :: Prism' DisplayState Counter.State
-_Page1 =
-  prism Page1
-    \page ->
-      case page
-        of
-        Page1 page1 -> Right page1
-        _ -> Left page
+_Page1 :: Prism' DisplayState CounterState
+_Page1 = prism Page1 _page1
+  where
+  _page1 (Page1 page1) = Right page1
+  _page1 page = Left page
 
-_Page2 :: Prism' DisplayState Counter.State
-_Page2 =
-  prism Page2
-    \page ->
-      case page
-        of
-        Page2 page2 -> Right page2
-        _ -> Left page
+_Page2 :: Prism' DisplayState CounterState
+_Page2 = prism Page2 _page2
+  where
+  _page2 (Page2 page2) = Right page2
+  _page2 page = Left page
 
 -- We define three lenses: One to access the page currently selected and the
 -- other two to store the state of the pages whenever they're unselected and
@@ -171,7 +165,7 @@ _page2 = lens _.page2 (_ { page2 = _ })
 tab :: forall fx . P.UIComponent fx State R.ReactElement
 tab =
   -- Working with Records it's cleaner than working with Algebraic Data Types.
-  (P.swap _new)
+  (P.focus' _new)
     do
     handler <- unwrap2 <$> P.eventHandler
 
@@ -198,28 +192,30 @@ tab =
       ]
 
   goPage1 =
-    do
-    state <- P.get
+    unsafePartial
+      do
+      state <- get
 
-    -- Backup the page that will be displaced from the view.
-    let page2 = state ^? _display .. _Page2
-    P.modify $ maybe id (_page2 .~ _) page2
+      -- Backup the page that will be displaced from the view.
+      let Just page2 = state ^? _display .. _Page2
+      _page2 .= page2
 
-    -- Switch the view to the new page.
-    let page1 = state ^. _page1
-    P.modify $ _display .~ Page1 page1
+      -- Switch the view to the new page.
+      let page1 = state ^. _page1
+      _display .= Page1 page1
 
   goPage2 =
-    do
-    state <- P.get
+    unsafePartial
+      do
+      state <- get
 
-    -- Backup the page that will be displaced from the view.
-    let page1 = state ^? _display .. _Page1
-    P.modify $ maybe id (_page1 .~ _) page1
+      -- Backup the page that will be displaced from the view.
+      let Just page1 = state ^? _display .. _Page1
+      _page1 .= page1
 
-    -- Switch the view to the new page.
-    let page2 = state ^. _page2
-    P.modify $ _display .~ Page2 page2
+      -- Switch the view to the new page.
+      let page2 = state ^. _page2
+      _display .= Page2 page2
 ```
 
 ### App component
@@ -272,7 +268,7 @@ _tabDisplayTotal = _tabs .. traversed .. _new .. _display
 
 app :: forall fx . P.UIComponent fx State R.ReactElement
 app =
-  (P.swap _new)
+  (P.focus' _new)
     do
     -- Another nice feature of traversals is that they're first-class citizens.
     -- We can compose them and store them as you would with functions!
@@ -292,11 +288,11 @@ app =
 
   onClick =
     do
-    P.modify $ _tabDisplayTotal .. _Page1 .. _additive %~ (_ + 1)
-    P.modify $ _tabDisplayTotal .. _Page2 .. _additive %~ (_ + 1)
+    _tabDisplayTotal .. _Page1 .. _additive %= (_ + 1)
+    _tabDisplayTotal .. _Page2 .. _additive %= (_ + 1)
 
-    P.modify $ _tabTotal .. _page1 .. _additive %~ (_ + 1)
-    P.modify $ _tabTotal .. _page2 .. _additive %~ (_ + 1)
+    _tabTotal .. _page1 .. _additive %= (_ + 1)
+    _tabTotal .. _page2 .. _additive %= (_ + 1)
 ```
 
 Right now, the app you'll see by running this code is a button that increases a number by five every time it's clicked... quite the app, I know, but there's more to it than meets the eye: We're using the power of traversals to expressively count the total number of clicks of the visible page from each of the five tab components and we're also increasing by one the click count of the hidden pages (that will eventually be swapped after we select them) every time we click one global button. Right now we don't have the ability to show the tabs in our app but once we have indexed traversals it'll be super easy to do. I wonder how many lines of functional & boilerplate code and how many physical files you would need to make this same app in other frameworks/architectures...

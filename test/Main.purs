@@ -6,28 +6,14 @@
 module Main
 where
 
-import Control.Alt((<|>))
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception.Unsafe (unsafeThrow)
-import Control.Monad.State (get)
-import Data.Array (singleton)
-import Data.Lens
-  ( (%=)
-  , (.=)
-  , (^.)
-  , (^?)
-  , Iso'
-  , Lens'
-  , Prism'
-  , Traversal'
-  , iso
-  , lens
-  , prism
-  , traversed
-  )
+import Control.Monad.Reader (ask)
+import Data.Array (singleton, snoc)
+import Data.Foldable (intercalate)
+import Data.Lens ((%=), Iso', Lens', iso, lens, traversed)
 import Data.Lens.Iso.Newtype (_Newtype)
-import Data.Either (Either(..))
-import Data.Maybe (Maybe(..), fromJust)
+import Data.Maybe (fromJust)
 import Data.Monoid (class Monoid, mempty)
 import Data.Monoid.Additive (Additive(..))
 import Data.Newtype (class Newtype, unwrap)
@@ -51,7 +37,7 @@ import React
   )
   as R
 import ReactDOM (render) as R
-import React.DOM (a, button, div', text) as R
+import React.DOM (br', button, div', text) as R
 import React.DOM.Props (onClick) as R
 
 infixr 9 o as ..
@@ -70,142 +56,28 @@ unwrap2 fabc a b = unwrap $ fabc a b
 
 type CounterState = Additive Int
 
-counter :: forall fx . P.UIComponent fx CounterState R.ReactElement
+counter :: forall fx . P.Component fx CounterState R.ReactElement
 counter =
   (P.focus' _additive)
     do
-    clicks <- get
-    handler <- unwrap2 <$> P.eventHandler
-    pure $ display clicks handler
+    clicks <- ask
+    dispatcher <- unwrap2 <$> P.eventDispatcher
+    pure $ display clicks dispatcher
   where
-  display clicks handler =
+  display clicks dispatcher =
     R.div'
       [ R.div' [R.text $ "# clicks: " <> show clicks]
-      , R.button [R.onClick $ handler onClick] [R.text "Increment"]
+      , R.button [R.onClick $ dispatcher onClick] [R.text "Increment"]
       ]
 
   onClick = _this %= (_ + 1)
 
-data DisplayState
-  = Page1 CounterState
-  | Page2 CounterState
-
-instance semigroupDisplayState :: Semigroup (DisplayState)
-  where
-  append (Page1 state1) (Page1 state2) = Page1 $ state1 <> state2
-  append (Page2 state1) (Page2 state2) = Page2 $ state1 <> state2
-  append page _ = page
-
-type TabState' =
-  { display :: DisplayState
-  , page1 :: CounterState
-  , page2 :: CounterState
-  }
-
-newtype TabState = TabState TabState'
-
-derive instance newtypeTabState :: Newtype (TabState) _
-
-instance semigroupTabState :: Semigroup (TabState)
-  where
-  append (TabState state1) (TabState state2) =
-    TabState
-      { display : state1.display <> state2.display
-      , page1 : state1.page1 <> state2.page1
-      , page2 : state1.page2 <> state2.page2
-      }
-
-instance monoidTabState :: Monoid (TabState)
-  where
-  mempty =
-    TabState
-      { display : Page1 mempty
-      , page1 : mempty
-      , page2 : mempty
-      }
-
-_Page1 :: Prism' DisplayState CounterState
-_Page1 = prism Page1 _page
-  where
-  _page (Page1 page1) = Right page1
-  _page page = Left page
-
-_Page2 :: Prism' DisplayState CounterState
-_Page2 = prism Page2 _page
-  where
-  _page (Page2 page2) = Right page2
-  _page page = Left page
-
-_display :: Lens' TabState' DisplayState
-_display = lens _.display (_ { display = _ })
-
-_page1 :: Lens' TabState' CounterState
-_page1 = lens _.page1 (_ { page1 = _ })
-
-_page2 :: Lens' TabState' CounterState
-_page2 = lens _.page2 (_ { page2 = _ })
-
-tab :: forall fx . P.UIComponent fx TabState R.ReactElement
-tab =
-  (P.focus' _Newtype)
-    do
-    handler <- unwrap2 <$> P.eventHandler
-
-    let _counter = map singleton counter
-    page1 <- P.focus (_display .. _Page1) _counter
-    page2 <- P.focus (_display .. _Page2) _counter
-
-    pure $ display handler (page1 <|> page2)
-  where
-  display handler page =
-    R.div'
-      [
-        R.div'
-          [ R.a [R.onClick $ handler goPage1] [R.text "Page 1"]
-          , R.text " | "
-          , R.a [R.onClick $ handler goPage2] [R.text "Page 2"]
-          ]
-      , R.div' page
-      ]
-
-  goPage1 =
-    unsafePartial
-      do
-      state <- get
-
-      -- Backup the page that will be displaced from the view.
-      let Just page2 = state ^? _display .. _Page2
-      _page2 .= page2
-
-      -- Switch the view to the new page.
-      let page1 = state ^. _page1
-      _display .= Page1 page1
-
-  goPage2 =
-    unsafePartial
-      do
-      state <- get
-
-      -- Backup the page that will be displaced from the view.
-      let Just page1 = state ^? _display .. _Page1
-      _page1 .= page1
-
-      -- Switch the view to the new page.
-      let page2 = state ^. _page2
-      _display .= Page2 page2
-
 type AppState' =
-  { tabs :: Array TabState
+  { tabs :: Array CounterState
   }
 
-_tabs :: Lens' AppState' (Array TabState)
+_tabs :: Lens' AppState' (Array CounterState)
 _tabs = lens _.tabs (_ { tabs = _ })
-
-_tabDisplayTotal :: Traversal' AppState' DisplayState
-_tabDisplayTotal = _tabs .. traversed .. _Newtype .. _display
-
-_tabTotal :: Traversal' AppState' TabState'
-_tabTotal = _tabs .. traversed .. _Newtype
 
 newtype AppState = AppState AppState'
 
@@ -219,34 +91,33 @@ instance monoidAppState :: Monoid (AppState)
   where
   mempty =
     AppState
-      { tabs : [mempty, mempty, mempty, mempty, mempty]
+      { tabs : [mempty, mempty]
       }
 
-app :: forall fx . P.UIComponent fx AppState R.ReactElement
+app :: forall fx . P.Component fx AppState R.ReactElement
 app =
   (P.focus' _Newtype)
     do
-    total1 <- P.focus (_tabDisplayTotal .. _Page1) get
-    total2 <- P.focus (_tabDisplayTotal .. _Page2) get
+    dispatcher <- unwrap2 <$> P.eventDispatcher
 
-    handler <- unwrap2 <$> P.eventHandler
-    let total = unwrap $ total1 <> total2
+    let counter' = map singleton counter
+    counterDisplays <- P.focus (_tabs .. traversed) counter'
 
-    pure $ display handler total
+    pure $ display counterDisplays dispatcher
   where
-  display handler total =
-    R.div'
-      [ R.div' [R.text $ "Total # clicks: " <> show total]
-      , R.button [R.onClick $ handler onClick] [R.text "Increment Total"]
-      ]
+  display counterDisplays dispatcher =
+    let counterDisplays' = map singleton counterDisplays
+    in
+    R.div' $ intercalate [newLine] counterDisplays' <> footer dispatcher
 
-  onClick =
-    do
-    _tabDisplayTotal .. _Page1 .. _additive %= (_ + 1)
-    _tabDisplayTotal .. _Page2 .. _additive %= (_ + 1)
+  footer dispatcher =
+    [ newLine
+    , R.button [R.onClick $ dispatcher onClick] [R.text "Add Counter"]
+    ]
 
-    _tabTotal .. _page1 .. _additive %= (_ + 1)
-    _tabTotal .. _page2 .. _additive %= (_ + 1)
+  newLine = R.br' []
+
+  onClick = _this .. _tabs %= flip snoc mempty
 
 type ReactFx =
   ( dom :: DOM
@@ -259,10 +130,10 @@ main :: Eff ReactFx Unit
 main =
   unsafePartial
     do
-    let spec = P.spec app splashScreen mempty
+    let spec = P.spec app mempty
     let element = flip R.createFactory {} $ R.createClass spec
-    refDocument <- map D.htmlDocumentToParentNode $ D.window >>= D.document
-    refApp <- fromJust <$> D.querySelector (D.QuerySelector "#app") refDocument
-    void $ R.render element refApp
+    rDocument <- map D.htmlDocumentToParentNode $ D.window >>= D.document
+    rApp <- fromJust <$> D.querySelector (D.QuerySelector "#app") rDocument
+    void $ R.render element rApp
   where
   splashScreen = R.text ""

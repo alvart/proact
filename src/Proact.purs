@@ -20,8 +20,8 @@
 module Proact
 ( Action
 , Component
-, EventDispatcher
 , EventHandler
+, EventDispatcher
 , ReactContext
 , eventDispatcher
 , focus
@@ -78,6 +78,49 @@ import React
 -- | An monoidal representation of applicative actions appended with (*>).
 newtype Action f = Action (f Unit)
 
+-- | A monadic representation of a component's GUI that provides access to its
+-- | state through the `MonadAsk` interface.
+newtype Component fx state a =
+  Component (ProComponent (ReaderT (This fx state) (Eff fx)) a state state)
+
+-- | A monadic representation of an event handler that manipulates the
+-- | component's state through the `MonadState` interface and to the event data
+-- | through the `MonadAsk` interface.
+newtype EventHandler fx state event a =
+  EventHandler (ProComponent (ReaderT event (Aff fx)) a state state)
+
+-- | A component representation of the Profunctor, Strong and Choice classes.
+newtype ProComponent m a _in out =
+  ProComponent (Producer out (Consumer _in m) a)
+
+-- A composable representation of the underlying react `this` object.
+data This fx state =
+  This (state -> Aff fx Unit) (Eff fx state)
+  | ReactThis (React.ReactThis {} state)
+
+-- | A type synonym for an event handler that is accessible from a Component.
+-- | An event object may be provided later to trigger an event action.
+type EventDispatcher fx state event =
+  EventHandler fx state event Unit -> event -> Action (Eff (ReactContext fx))
+
+-- | A type synonym for effects associated to React components.
+type ReactContext fx =
+  ( props :: React.ReactProps
+  , refs :: React.ReactRefs React.ReadOnly
+  , state :: React.ReactState React.ReadWrite
+  | fx
+  )
+
+-- A type synonym for the consumer co-routine at the first layer of a
+-- producer/consumer stack.
+type AwaitBlock m a _in out =
+  Consumer _in m (Either a (Emit out (Producer out (Consumer _in m) a)))
+
+-- A type synonym for the consumer co-routine at the first layer of a
+-- producer/consumer stack that returns whether a Choice profunctor should yield
+-- the mismatched input type or not.
+type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
+
 derive instance newtypeAction :: Newtype (Action f) _
 
 instance semigroupAction :: (Apply f) => Semigroup (Action f)
@@ -87,10 +130,6 @@ instance semigroupAction :: (Apply f) => Semigroup (Action f)
 instance monoidAction :: (Applicative f) => Monoid (Action f)
   where
   mempty = Action $ pure unit
-
--- | A component representation of the Profunctor, Strong and Choice classes.
-newtype ProComponent m a _in out =
-  ProComponent (Producer out (Consumer _in m) a)
 
 derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
 
@@ -213,12 +252,6 @@ instance wanderProComponent
           Left (Right (Emit out1 emitNext)) -> completeEmit out1 emitNext
           Right (Await awaitNext) -> completeAwait $ awaitNext in1
 
--- | A monadic representation of an event handler that manipulates the
--- | component's state through the `MonadState` interface and to the event data
--- | through the `MonadAsk` interface.
-newtype EventHandler fx state event a =
-  EventHandler (ProComponent (ReaderT event (Aff fx)) a state state)
-
 derive instance newtypeEventHandler :: Newtype (EventHandler fx state event a) _
 
 instance functorEventHandler :: Functor (EventHandler fx state event)
@@ -263,11 +296,6 @@ instance monadStateEventHandler
       emit state'
       pure a
 
--- | A monadic representation of a component's GUI that provides access to its
--- | state through the `MonadAsk` interface.
-newtype Component fx state a =
-  Component (ProComponent (ReaderT (This fx state) (Eff fx)) a state state)
-
 derive instance newtypeComponent :: Newtype (Component fx state a) _
 
 instance functorComponent :: Functor (Component fx state)
@@ -304,24 +332,6 @@ instance monadAskComponent :: MonadAsk state (Component fx state)
 instance monadEffComponent :: MonadEff fx (Component fx state)
   where
   liftEff = Component <<< ProComponent <<< lift <<< lift <<< lift <<< liftEff
-
--- | A composable representation of the underlying react `this` object.
-data This fx state =
-  This (state -> Aff fx Unit) (Eff fx state)
-  | ReactThis (React.ReactThis {} state)
-
--- | A type synonym for effects associated to React components.
-type ReactContext fx =
-  ( props :: React.ReactProps
-  , refs :: React.ReactRefs React.ReadOnly
-  , state :: React.ReactState React.ReadWrite
-  | fx
-  )
-
--- | A type synonym for an event handler that is accessible from a Component.
--- | An event object may be provided later to trigger an event action.
-type EventDispatcher fx state event =
-  EventHandler fx state event Unit -> event -> Action (Eff (ReactContext fx))
 
 -- | Retrieves an event handler from the current UI context. Once this handler
 -- | receives an event component and an event it will trigger the actions
@@ -468,16 +478,6 @@ spec (Component (ProComponent iProducer)) iState = React.spec iState render
           pure $ Loop emitNext
 
     this = ReactThis _this
-
--- A type synonym for the consumer co-routine at the first layer of a
--- producer/consumer stack.
-type AwaitBlock m a _in out =
-  Consumer _in m (Either a (Emit out (Producer out (Consumer _in m) a)))
-
--- A type synonym for the consumer co-routine at the first layer of a
--- producer/consumer stack that returns whether a Choice profunctor should yield
--- the mismatched input type or not.
-type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
 
 -- Changes the contravariant type of a producer/consumer stack by giving the
 -- caller a choice on how to deal with the new input type. The last execution

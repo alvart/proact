@@ -30,6 +30,7 @@ module Proact
 )
 where
 
+import Control.Apply (lift2)
 import Control.Coroutine (Consumer, Producer, Await(..), Emit(..), await, emit)
 import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler)
 import Control.Monad.Eff (Eff)
@@ -45,7 +46,6 @@ import Control.Monad.State
   (class MonadState, evalStateT, execStateT, get, gets, modify, put)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Writer (runWriterT, tell)
-import Data.Array (fromFoldable)
 import Data.Array.Partial (head, tail)
 import Data.Bifunctor (lmap, rmap) as B
 import Data.Either (Either(..), fromLeft, isRight)
@@ -55,9 +55,8 @@ import Data.Newtype (class Newtype, unwrap)
 import Data.Profunctor (class Profunctor, lmap, rmap)
 import Data.Profunctor.Choice (class Choice)
 import Data.Profunctor.Strong (class Strong)
-import Data.Lens (class Wander, Lens', Traversal', element, set, toListOf, view)
+import Data.Lens (class Wander, Lens', Traversal', element, set, view)
 import Data.Tuple (Tuple(..), fst, snd)
-import Data.TraversableWithIndex (forWithIndex)
 import Partial.Unsafe (unsafePartial)
 import Prelude
 import React
@@ -75,23 +74,23 @@ import React
   )
   as React
 
--- | An monoidal representation of applicative actions appended with (*>).
-newtype Action f = Action (f Unit)
+-- | An monoidal representation of applicative actions appended in sequence.
+newtype Action f m = Action (f m)
 
 -- | A monadic representation of a component's GUI that provides access to its
 -- | state through the `MonadAsk` interface.
 newtype Component fx state a =
-  Component (ProComponent (ReaderT (This fx state) (Eff fx)) a state state)
+  Component (Engine (ReaderT (This fx state) (Eff fx)) a state state)
 
 -- | A monadic representation of an event handler that manipulates the
 -- | component's state through the `MonadState` interface and to the event data
 -- | through the `MonadAsk` interface.
 newtype EventHandler fx state event a =
-  EventHandler (ProComponent (ReaderT event (Aff fx)) a state state)
+  EventHandler (Engine (ReaderT event (Aff fx)) a state state)
 
--- | A component representation of the Profunctor, Strong and Choice classes.
-newtype ProComponent m a _in out =
-  ProComponent (Producer out (Consumer _in m) a)
+-- A component representation of the Profunctor, Strong, Choice and Wander type
+-- classes.
+newtype ProComponent m a _in out = ProComponent (Int -> Engine m a _in out)
 
 -- A composable representation of the underlying react `this` object.
 data This fx state =
@@ -101,7 +100,9 @@ data This fx state =
 -- | A type synonym for an event handler that is accessible from a Component.
 -- | An event object may be provided later to trigger an event action.
 type EventDispatcher fx state event =
-  EventHandler fx state event Unit -> event -> Action (Eff (ReactContext fx))
+  EventHandler fx state event Unit
+    -> event
+    -> Action (Eff (ReactContext fx)) Unit
 
 -- | A type synonym for effects associated to React components.
 type ReactContext fx =
@@ -121,22 +122,30 @@ type AwaitBlock m a _in out =
 -- the mismatched input type or not.
 type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
 
-derive instance newtypeAction :: Newtype (Action f) _
+-- A type synonym for the producer/consumer stack that is the engine behind all
+-- components.
+type Engine m a _in out = Producer out (Consumer _in m) a
 
-instance semigroupAction :: (Apply f) => Semigroup (Action f)
+-- Action :: NewType, SemiGroup, Monoid
+derive instance newtypeAction :: Newtype (Action f m) _
+
+instance semigroupAction :: (Apply f, Semigroup m) => Semigroup (Action f m)
   where
-  append (Action a1) (Action a2) = Action $ a1 *> a2
+  append (Action a1) (Action a2) = Action $ lift2 append a1 a2
 
-instance monoidAction :: (Applicative f) => Monoid (Action f)
+instance monoidAction :: (Applicative f, Monoid m) => Monoid (Action f m)
   where
-  mempty = Action $ pure unit
+  mempty = Action $ pure mempty
 
+-- ProComponent :: NewType, Profunctor, Strong, Choice, Wander
 derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
 
 instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
   where
-  dimap f g (ProComponent producer) =
-    ProComponent $ bimapFreeT (B.lmap g) (interpret (lmap f)) producer
+  dimap f g (ProComponent indexEngine) =
+    ProComponent \_ -> bimapFreeT (B.lmap g) (interpret (lmap f)) engine
+    where
+    engine = indexEngine 0
 
 instance strengthenProComponent
   :: (Monad m, MonadRec m) => Strong (ProComponent m a)
@@ -148,23 +157,26 @@ instance strengthenProComponent
 instance choiceProComponent
   :: (Monad m, MonadRec m, Monoid a) => Choice (ProComponent m a)
   where
-  left (ProComponent iProducer) =
-    choose selectLeft $ rmap Left $ ProComponent $ map Right iProducer
+  left (ProComponent indexEngine) =
+    choose selectLeft $ rmap Left $ ProComponent $ map (map Right) indexEngine
     where
     selectLeft (Await awaitNext) (Left in1) = awaitNext in1
     selectLeft _ (Right a) = pure $ Left $ Left (Right a)
 
-  right (ProComponent iProducer) =
-    choose selectLeft $ rmap Right $ ProComponent $ map Right iProducer
+  right (ProComponent indexEngine) =
+    choose selectRight
+      $ rmap Right
+      $ ProComponent
+      $ map (map Right) indexEngine
     where
-    selectLeft (Await awaitNext) (Right in1) = awaitNext in1
-    selectLeft _ (Left a) = pure $ Left $ Left (Left a)
+    selectRight (Await awaitNext) (Right in1) = awaitNext in1
+    selectRight _ (Left a) = pure $ Left $ Left (Left a)
 
 instance wanderProComponent
   :: (Monad m, MonadRec m, Monoid a) => Wander (ProComponent m a)
   where
-  wander traversal (ProComponent iProducer) =
-    ProComponent
+  wander traversal (ProComponent indexEngine) =
+    ProComponent \_ ->
       do
       -- Request input (a collection of states) and use it to gather the last
       -- emitted value of every child component until its co-routine either
@@ -172,7 +184,11 @@ instance wanderProComponent
       in2 <- lift await
 
       Tuple out2 pendingBlocks <-
-        lift $ lift $ runWriterT $ traversal initAwaitBlock in2
+        lift
+          $ lift
+          $ runWriterT
+          $ flip evalStateT 0
+          $ traversal initAwaitBlock in2
 
       -- Yield the collection of states assembled in the last step.
       emit out2
@@ -207,7 +223,7 @@ instance wanderProComponent
 
       -- For every component, if it immediately blocks awaiting for input then
       -- use the data from the original request (the collection of states) to
-      -- progress the co-routine, otherwise return the last yielded value before
+      -- resume the co-routine, otherwise return the last yielded value before
       -- the co-routine completed or blocked.
       -- It is assumed that each component will perform at least one yield
       -- operation before completing or blocking.
@@ -240,24 +256,37 @@ instance wanderProComponent
     initAwaitBlock in1 =
       unsafePartial
         do
+        index <- get
+        put $ index + 1
+
         -- Make a copy of the initial component for every input state, then if
         -- it immediately blocks awaiting for more input use the data from the
-        -- the original request to progress the co-routine, otherwise return the
-        -- last yielded value before the co-routine completed or blocked.
+        -- original request to resume the co-routine, otherwise return the last
+        -- yielded value before the co-routine completed or blocked.
         -- It is assumed that each component will perform at least one yield
         -- operation before completing or blocking.
-        step <- lift $ resume $ resume iProducer
-        case step
-          of
-          Left (Right (Emit out1 emitNext)) -> completeEmit out1 emitNext
-          Right (Await awaitNext) -> completeAwait $ awaitNext in1
+        step <- lift $ lift $ resume $ resume $ indexEngine index
+        lift
+          case step
+            of
+            Left (Right (Emit out1 emitNext)) -> completeEmit out1 emitNext
+            Right (Await awaitNext) -> completeAwait $ awaitNext in1
 
+-- EventHandler
+--  :: NewType
+--   , Functor
+--   , Apply
+--   , Applicative
+--   , Bind
+--   , Monad
+--   , MonadAsk
+--   , MonadEff
+--   , MonadState
 derive instance newtypeEventHandler :: Newtype (EventHandler fx state event a) _
 
 instance functorEventHandler :: Functor (EventHandler fx state event)
   where
-  map f (EventHandler (ProComponent fa)) =
-    EventHandler $ ProComponent $ map f fa
+  map f (EventHandler fa) = EventHandler $ map f fa
 
 instance applyEventHandler :: Apply (EventHandler fx state event)
   where
@@ -265,42 +294,51 @@ instance applyEventHandler :: Apply (EventHandler fx state event)
 
 instance applicativeEventHandler :: Applicative (EventHandler fx state event)
   where
-  pure a = EventHandler $ ProComponent $ pure a
+  pure a = EventHandler $ pure a
 
 instance bindEventHandler :: Bind (EventHandler fx state event)
   where
-  bind (EventHandler (ProComponent ma)) f =
-    (EventHandler <<< ProComponent)
+  bind (EventHandler ma) f =
+    EventHandler
       do
-      EventHandler (ProComponent mb) <- map f ma
+      EventHandler mb <- map f ma
       mb
 
 instance monadEventHandler :: Monad (EventHandler fx state event)
 
 instance monadAskEventHandler :: MonadAsk event (EventHandler fx state event)
   where
-  ask = EventHandler $ ProComponent $ lift $ lift ask
+  ask = EventHandler $ lift $ lift ask
 
 instance monadEffEventHandler :: MonadEff fx (EventHandler fx state event)
   where
-  liftEff = EventHandler <<< ProComponent <<< lift <<< lift <<< lift <<< liftEff
+  liftEff = EventHandler <<< lift <<< lift <<< lift <<< liftEff
 
 instance monadStateEventHandler
   :: MonadState state (EventHandler fx state event)
   where
   state f =
-    (EventHandler <<< ProComponent)
+    EventHandler
       do
       _state <- lift await
       let Tuple a state' = f _state
       emit state'
       pure a
 
+-- Component
+--  :: NewType
+--   , Functor
+--   , Apply
+--   , Applicative
+--   , Bind
+--   , Monad
+--   , MonadAsk
+--   , MonadEff
 derive instance newtypeComponent :: Newtype (Component fx state a) _
 
 instance functorComponent :: Functor (Component fx state)
   where
-  map f (Component (ProComponent fa)) = Component $ ProComponent $ map f fa
+  map f (Component fa) = Component $ map f fa
 
 instance applyComponent :: Apply (Component fx state)
   where
@@ -308,14 +346,14 @@ instance applyComponent :: Apply (Component fx state)
 
 instance applicativeComponent :: Applicative (Component fx state)
   where
-  pure a = Component $ ProComponent $ pure a
+  pure = Component <<< pure
 
 instance bindComponent :: Bind (Component fx state)
   where
-  bind (Component (ProComponent ma)) f =
-    (Component <<< ProComponent)
+  bind (Component ma) f =
+    Component
       do
-      Component (ProComponent mb) <- map f ma
+      Component mb <- map f ma
       mb
 
 instance monadComponent :: Monad (Component fx state)
@@ -323,7 +361,7 @@ instance monadComponent :: Monad (Component fx state)
 instance monadAskComponent :: MonadAsk state (Component fx state)
   where
   ask =
-    (Component <<< ProComponent)
+    Component
       do
       state <- lift await
       emit state
@@ -331,7 +369,7 @@ instance monadAskComponent :: MonadAsk state (Component fx state)
 
 instance monadEffComponent :: MonadEff fx (Component fx state)
   where
-  liftEff = Component <<< ProComponent <<< lift <<< lift <<< lift <<< liftEff
+  liftEff = Component <<< lift <<< lift <<< lift <<< liftEff
 
 -- | Retrieves an event handler from the current UI context. Once this handler
 -- | receives an event component and an event it will trigger the actions
@@ -339,16 +377,15 @@ instance monadEffComponent :: MonadEff fx (Component fx state)
 eventDispatcher
   :: forall fx state event . Component fx state (EventDispatcher fx state event)
 eventDispatcher =
-  (Component <<< ProComponent)
+  Component
     do
     this <- lift $ lift ask
     pure $ dispatcher this
   where
-  dispatcher this (EventHandler (ProComponent iProducer)) event =
+  dispatcher this (EventHandler engine) event =
     Action $ unsafeCoerceEff $ launchAff_ dispatch
     where
-    -- Runs a component and asynchronously returns its monadic value.
-    dispatch = tailRecM stepProducer iProducer
+    dispatch = tailRecM stepProducer engine
 
     stepConsumer consumer =
       do
@@ -381,47 +418,24 @@ focus
   => Traversal' state1 state2
   -> Component fx state2 render
   -> Component fx state1 render
-focus _traversal (Component (ProComponent iProducer)) =
-  (Component <<< ProComponent)
-    do
-    in1 <- _ask
-    let in1List = fromFoldable $ toListOf _traversal in1
-
-    (map fold <<< forWithIndex in1List)
-      \index state ->
-        do
-        let hoistFunc = withReaderT \this -> focusThis index this
-        let profunctor = ProComponent $ initProducer state
-        let profunctor' = hoistProComponent hoistFunc profunctor
-        unwrap $ element index _traversal profunctor'
+focus _traversal (Component engine) =
+  Component $ (unwrap $ _traversal profunctor) 0
   where
-  focusThis index this = This push_ read_
+  focusThis index this = This _push _read
     where
-    push_ state2 =
+    _push state2 =
       do
       state1 <- liftEff $ read this
       push this $ set (element index _traversal) state2 state1
 
-    read_ =
+    _read =
       do
       state1 <- read this
-
-      -- NOTE:
-      --  Prisms don't work as expected when using indexing. Fortunately, there
-      --  are no scenarios using Prisms and Proact components that cannot be
-      --  implemented using the more general Traversal lenses.
       pure $ view (element index _traversal) state1
 
-  initProducer state =
-    freeT \_ -> freeT \_ ->
-      do
-      step <- resume $ resume iProducer
-      case step
-        of
-        Left emitBlock -> pure $ Left emitBlock
-        Right (Await awaitNext) -> resume $ awaitNext state
-
-  Component (ProComponent _ask) = ask
+  profunctor =
+    ProComponent \index ->
+      hoistEngine (withReaderT \this -> focusThis index this) engine
 
 -- | Changes a component's state type through a lens.
 -- | For a more general albeit more restrictive version, consider `focus`.
@@ -430,7 +444,7 @@ focus'
    . Lens' state1 state2
   -> Component fx state2 render
   -> Component fx state1 render
-focus' _lens (Component profunctor) = Component $ _lens profunctor'
+focus' _lens (Component engine) = Component $ (unwrap $ _lens profunctor) 0
   where
   focusThis this = This _push _read
     where
@@ -444,7 +458,7 @@ focus' _lens (Component profunctor) = Component $ _lens profunctor'
       state1 <- read this
       pure $ view _lens state1
 
-  profunctor' = hoistProComponent (withReaderT focusThis) profunctor
+  profunctor = ProComponent \index -> hoistEngine (withReaderT focusThis) engine
 
 -- | Creates a `ReactSpec` from a Proact Component.
 spec
@@ -452,9 +466,9 @@ spec
    . Component fx state React.ReactElement
   -> state
   -> React.ReactSpec {} state fx
-spec (Component (ProComponent iProducer)) iState = React.spec iState render
+spec (Component engine) iState = React.spec iState render
   where
-  render _this = unsafeCoerceEff $ tailRecM stepProducer iProducer
+  render _this = unsafeCoerceEff $ tailRecM stepProducer engine
     where
     stepConsumer consumer =
       do
@@ -474,7 +488,8 @@ spec (Component (ProComponent iProducer)) iState = React.spec iState render
         of
         Left a -> pure $ Done a
         Right (Emit _ emitNext) ->
-          -- Components only emit unchanged states so it's safe to ignore them.
+          -- Components only emit unchanged states so it's safe to ignore them
+          -- in this context.
           pure $ Loop emitNext
 
     this = ReactThis _this
@@ -498,9 +513,11 @@ choose
      )
   -> ProComponent m (Either out a) in1 out
   -> ProComponent m a in2 out
-choose select (ProComponent iProducer) =
-  ProComponent $ stepOutProducer $ stepInProducer iProducer
+choose select (ProComponent indexEngine) =
+  ProComponent \_ -> stepOutProducer $ stepInProducer engine
   where
+  engine = indexEngine 0
+
   stepConsumer consumer =
     freeT \_ ->
       do
@@ -527,13 +544,11 @@ choose select (ProComponent iProducer) =
 
   stepInProducer producer = freeT $ const $ stepConsumer $ resume producer
 
--- Changes the underlying monadic context of a component's profunctor.
-hoistProComponent
+-- Changes the underlying monadic context of a component's engine.
+hoistEngine
   :: forall m n a _in out
-   . Functor n
-  => (m ~> n) -> ProComponent m a _in out -> ProComponent n a _in out
-hoistProComponent hoistFunc (ProComponent iProducer) =
-  ProComponent $ hoistFreeT (hoistFreeT hoistFunc) iProducer
+   . Functor n => (m ~> n) -> Engine m a _in out -> Engine n a _in out
+hoistEngine hoistFunc engine = hoistFreeT (hoistFreeT hoistFunc) engine
 
 -- An abstraction of the `React.writeState` function exposing an asynchronous
 -- facade.
@@ -568,8 +583,8 @@ strengthen
   => (_in -> out1 -> out2)
   -> ProComponent m b _in out1
   -> ProComponent m b _in out2
-strengthen emit' (ProComponent iProducer) =
-  ProComponent $ stepProducer iProducer
+strengthen emit' (ProComponent indexEngine) =
+  ProComponent \_ -> stepProducer engine
   where
   completeAwait awaitBlock _in =
     freeT \_ -> unsafePartial
@@ -580,6 +595,8 @@ strengthen emit' (ProComponent iProducer) =
         Left (Left b) -> pure $ Left $ Left b
         Left (Right (Emit out1 emitNext)) ->
           pure $ Left $ Right $ Emit (emit' _in out1) $ stepProducer emitNext
+
+  engine = indexEngine 0
 
   stepProducer producer =
     freeT \_ -> freeT \_ -> unsafePartial

@@ -8,10 +8,10 @@ where
 
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception.Unsafe (unsafeThrow)
-import Control.Monad.Reader (ask)
+import Control.Monad.Reader (ask, asks)
 import Data.Array (singleton, snoc)
 import Data.Foldable (intercalate)
-import Data.Lens ((%=), Iso', Lens', iso, lens, traversed)
+import Data.Lens ((%=), (+=), (^.), Iso', Lens', iso, lens, traversed)
 import Data.Lens.Iso.Newtype (_Newtype)
 import Data.Maybe (fromJust)
 import Data.Monoid (class Monoid, mempty)
@@ -66,18 +66,18 @@ counter =
   where
   display clicks dispatcher =
     R.div'
-      [ R.div' [R.text $ "# clicks: " <> show clicks]
+      [ R.div' [R.text $ "#clicks: " <> show clicks]
       , R.button [R.onClick $ dispatcher onClick] [R.text "Increment"]
       ]
 
   onClick = _this %= (_ + 1)
 
 type AppState' =
-  { tabs :: Array CounterState
+  { counters :: Array CounterState
   }
 
-_tabs :: Lens' AppState' (Array CounterState)
-_tabs = lens _.tabs (_ { tabs = _ })
+_counters :: Lens' AppState' (Array CounterState)
+_counters = lens _.counters (_ { counters = _ })
 
 newtype AppState = AppState AppState'
 
@@ -91,7 +91,7 @@ instance monoidAppState :: Monoid (AppState)
   where
   mempty =
     AppState
-      { tabs : [mempty, mempty]
+      { counters : [mempty, mempty, mempty]
       }
 
 app :: forall fx . P.Component fx AppState R.ReactElement
@@ -101,23 +101,31 @@ app =
     dispatcher <- unwrap2 <$> P.eventDispatcher
 
     let counter' = map singleton counter
-    counterDisplays <- P.focus (_tabs .. traversed) counter'
+    counterDisplays <- P.focus (_counters .. traversed) counter'
 
-    pure $ display counterDisplays dispatcher
+    total <- asks $ unwrap <<< (_ ^. _counters .. traversed)
+
+    pure $ display dispatcher counterDisplays total
   where
-  display counterDisplays dispatcher =
+  display dispatcher counterDisplays total =
     let counterDisplays' = map singleton counterDisplays
     in
-    R.div' $ intercalate [newLine] counterDisplays' <> footer dispatcher
+    R.div' $ intercalate [newLine] counterDisplays' <> footer dispatcher total
 
-  footer dispatcher =
+  footer dispatcher total =
     [ newLine
-    , R.button [R.onClick $ dispatcher onClick] [R.text "Add Counter"]
+    , R.div' [R.text $ "Total # clicks: " <> show total]
+    , R.button [R.onClick $ dispatcher increment] [R.text "Increment Total"]
+    , newLine
+    , newLine
+    , R.button [R.onClick $ dispatcher addCounter] [R.text "Add Counter"]
     ]
 
   newLine = R.br' []
 
-  onClick = _this .. _tabs %= flip snoc mempty
+  addCounter = _counters %= flip snoc mempty
+
+  increment = _counters .. traversed .. _Newtype += 1
 
 type ReactFx =
   ( dom :: DOM

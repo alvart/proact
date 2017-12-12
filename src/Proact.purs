@@ -21,11 +21,13 @@ module Proact
 ( Action
 , Component
 , EventHandler
+, EventHandle
 , EventDispatcher
 , ReactContext
 , eventDispatcher
 , focus
 , focus'
+, noAction
 , spec
 )
 where
@@ -75,7 +77,7 @@ import React
   as React
 
 -- | An monoidal representation of applicative actions appended in sequence.
-newtype Action f m = Action (f m)
+newtype Action fx = Action (Eff (ReactContext fx) Unit)
 
 -- | A monadic representation of a component's GUI that provides access to its
 -- | state through the `MonadAsk` interface.
@@ -98,11 +100,14 @@ data This fx state =
   | ReactThis (React.ReactThis {} state)
 
 -- | A type synonym for an event handler that is accessible from a Component.
--- | An event object may be provided later to trigger an event action.
+-- | An event object may be later provided to the handler to trigger an event
+-- | action.
 type EventDispatcher fx state event =
-  EventHandler fx state event Unit
-    -> event
-    -> Action (Eff (ReactContext fx)) Unit
+  Component fx state (EventHandler fx state event Unit -> EventHandle fx event)
+
+-- | A type synonym for the target of an event handler that listens for a
+-- | specific event and then triggers an action.
+type EventHandle fx event = event -> Action fx
 
 -- | A type synonym for effects associated to React components.
 type ReactContext fx =
@@ -127,13 +132,13 @@ type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
 type Engine m a _in out = Producer out (Consumer _in m) a
 
 -- Action :: NewType, SemiGroup, Monoid
-derive instance newtypeAction :: Newtype (Action f m) _
+derive instance newtypeAction :: Newtype (Action fx) _
 
-instance semigroupAction :: (Apply f, Semigroup m) => Semigroup (Action f m)
+instance semigroupAction :: Semigroup (Action fx)
   where
   append (Action a1) (Action a2) = Action $ lift2 append a1 a2
 
-instance monoidAction :: (Applicative f, Monoid m) => Monoid (Action f m)
+instance monoidAction :: Monoid (Action fx)
   where
   mempty = Action $ pure mempty
 
@@ -143,9 +148,8 @@ derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
 instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
   where
   dimap f g (ProComponent indexEngine) =
-    ProComponent \_ -> bimapFreeT (B.lmap g) (interpret (lmap f)) engine
-    where
-    engine = indexEngine 0
+    ProComponent
+      \index -> bimapFreeT (B.lmap g) (interpret (lmap f)) $ indexEngine index
 
 instance strengthenProComponent
   :: (Monad m, MonadRec m) => Strong (ProComponent m a)
@@ -374,8 +378,7 @@ instance monadEffComponent :: MonadEff fx (Component fx state)
 -- | Retrieves an event handler from the current UI context. Once this handler
 -- | receives an event component and an event it will trigger the actions
 -- | contained in the monadic side-effects (asynchronous).
-eventDispatcher
-  :: forall fx state event . Component fx state (EventDispatcher fx state event)
+eventDispatcher :: forall fx state event . EventDispatcher fx state event
 eventDispatcher =
   Component
     do
@@ -460,6 +463,10 @@ focus' _lens (Component engine) = Component $ (unwrap $ _lens profunctor) 0
 
   profunctor = ProComponent \index -> hoistEngine (withReaderT focusThis) engine
 
+-- | Creates a default action with no side-effects.
+noAction :: forall fx . Action fx
+noAction = Action $ pure mempty
+
 -- | Creates a `ReactSpec` from a Proact Component.
 spec
   :: forall fx state
@@ -514,10 +521,8 @@ choose
   -> ProComponent m (Either out a) in1 out
   -> ProComponent m a in2 out
 choose select (ProComponent indexEngine) =
-  ProComponent \_ -> stepOutProducer $ stepInProducer engine
+  ProComponent \index -> stepOutProducer $ stepInProducer $ indexEngine index
   where
-  engine = indexEngine 0
-
   stepConsumer consumer =
     freeT \_ ->
       do
@@ -584,7 +589,7 @@ strengthen
   -> ProComponent m b _in out1
   -> ProComponent m b _in out2
 strengthen emit' (ProComponent indexEngine) =
-  ProComponent \_ -> stepProducer engine
+  ProComponent \index -> stepProducer $ indexEngine index
   where
   completeAwait awaitBlock _in =
     freeT \_ -> unsafePartial
@@ -595,8 +600,6 @@ strengthen emit' (ProComponent indexEngine) =
         Left (Left b) -> pure $ Left $ Left b
         Left (Right (Emit out1 emitNext)) ->
           pure $ Left $ Right $ Emit (emit' _in out1) $ stepProducer emitNext
-
-  engine = indexEngine 0
 
   stepProducer producer =
     freeT \_ -> freeT \_ -> unsafePartial

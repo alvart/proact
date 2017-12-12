@@ -26,7 +26,7 @@ import React.DOM.Props
 import Prelude
 import Proact as P
 import Unsafe.Coerce (unsafeCoerce)
-import Utility ((..), unwrap2, unwrap3)
+import Utility (ReactHandler, (..), unwrap2, unwrap3)
 
 -- | The state of a task component.
 newtype State =
@@ -68,7 +68,8 @@ _index :: Lens' State Int
 _index = _Newtype .. lens _.index (_ { index = _ })
 
 -- | The task component.
-task :: forall fx . P.EventHandle fx Int -> P.Component fx State R.ReactElement
+task
+  :: forall fx . ReactHandler fx Int -> P.Component fx State R.ReactElement
 task onDelete' =
   do
   state <- ask
@@ -98,9 +99,6 @@ task onDelete' =
 
   fromInputEvent event = { checked : (unsafeCoerce event).target.checked }
 
-  onCompleted =
-    do
-    event <- ask
-    _completed .= event.checked
+  onCompleted event = _completed .= event.checked
 
   onDelete = unwrap2 onDelete'

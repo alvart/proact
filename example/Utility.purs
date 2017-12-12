@@ -6,10 +6,15 @@
 module Utility
 where
 
+import Control.Monad.Eff (Eff)
 import Control.Monad.Reader (class MonadAsk, asks)
 import Data.Lens (Getter, (^.))
 import Data.Newtype (class Newtype, unwrap)
 import Prelude
+import Proact (Action, ReactContext)
+
+-- | An type synonym for React event handlers.
+type ReactHandler fx event = event -> Action (Eff (ReactContext fx)) Unit
 
 -- | An alias for arrow left composition.
 o :: forall a b c d . Semigroupoid a => a c d -> a b c -> a b d

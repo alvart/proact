@@ -14,7 +14,7 @@ module Todo
 where
 
 import Control.Monad.Eff.Exception.Unsafe (unsafeThrow)
-import Control.Monad.Reader (ask)
+import Control.Monad.Reader (ask, asks)
 import Data.Array (deleteAt, filter, length, singleton, snoc)
 import Data.Identity (Identity)
 import Data.Lens (Lens', (%=), (.=), (.~), (^.), lens, traversed)
@@ -46,7 +46,7 @@ import React.DOM.Props
   (className, onChange, onClick, onKeyUp, placeholder, value) as R
 import Task as Task
 import Unsafe.Coerce (unsafeCoerce)
-import Utility ((..), unwrap3, use')
+import Utility (ReactHandler, (..), unwrap3, use')
 
 -- | The three filters which can be applied to the list of tasks.
 data Filter =
@@ -124,29 +124,20 @@ filterBar =
         then "btn toolbar active"
         else "btn toolbar"
 
-      onFilterChanged =
-        do
-        _filter .= filter'
+      onFilterChanged _ = _filter .= filter'
 
 -- A task to which a filter has been applied.
 filteredTask
   :: forall fx
-   . Filter
-  -> P.EventHandle fx Int
+   . (Task.State -> Boolean)
+  -> ReactHandler fx Int
   -> P.Component fx Task.State (Array R.ReactElement)
-filteredTask All onDelete = singleton <$> Task.task onDelete
-filteredTask Completed onDelete =
+filteredTask filter' onDelete =
   do
-  completed <- use' Task._completed
-  if completed
+  visible <- asks filter'
+  if visible
     then singleton <$> Task.task onDelete
     else pure []
-filteredTask Active onDelete =
-  do
-  completed <- use' Task._completed
-  if completed
-    then pure []
-    else singleton <$> Task.task onDelete
 
 -- A task to which a filter has been applied.
 taskBox :: forall fx . P.Component fx State R.ReactElement
@@ -182,22 +173,17 @@ taskBox =
 
     newTask index text = (Task._index .~ index) .. (Task._description .~ text)
 
-    onNewTaskEnter =
-      do
-      event <- ask
+    onNewTaskEnter event =
       if event.keyCode == 13 && event.text /= ""
-        then
-          do
-          let index = length $ state ^. _tasks
-          _tasks %= flip snoc (newTask index event.text mempty)
-        else if event.keyCode == 27
-        then _taskDescription .= ""
-        else pure unit
+      then
+        do
+        let index = length $ state ^. _tasks
+        _tasks %= flip snoc (newTask index event.text mempty)
+      else if event.keyCode == 27
+      then _taskDescription .= ""
+      else pure unit
 
-    onTextChanged =
-      do
-      event <- ask
-      _taskDescription .= event.text
+    onTextChanged event = _taskDescription .= event.text
 
 -- The table showing the filtered list of tasks.
 taskTable :: forall fx . P.Component fx State R.ReactElement
@@ -209,7 +195,7 @@ taskTable =
   taskBoxView <- taskBox
   tasksView <-
     P.focus (_tasks .. traversed)
-      $ filteredTask filter'
+      $ filteredTask (taskFilter filter')
       $ deleteDispatcher onDelete
 
   pure $ view taskBoxView tasksView
@@ -231,10 +217,11 @@ taskTable =
           $ [R.tr' [R.td' [], R.td' [taskBoxView], R.td' []]] <> tasksView
       ]
 
-  onDelete =
-    do
-    index <- ask
-    _tasks %= deleteTaskAt index
+  taskFilter All _ = true
+  taskFilter Completed task = task ^. Task._completed
+  taskFilter Active task = not $ task ^. Task._completed
+
+  onDelete index = _tasks %= deleteTaskAt index
 
   deleteTaskAt index array =
     case deleteAt index array

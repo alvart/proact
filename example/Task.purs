@@ -26,7 +26,7 @@ import React.DOM.Props
 import Prelude
 import Proact as P
 import Unsafe.Coerce (unsafeCoerce)
-import Utility (ReactHandler, (..), unwrap2, unwrap3)
+import Utility (ReactHandler, (..))
 
 -- | The state of a task component.
 newtype State =
@@ -73,7 +73,7 @@ task
 task onDelete' =
   do
   state <- ask
-  inputDispatcher <- unwrap3 <$> P.eventDispatcher
+  inputDispatcher <- P.eventDispatcher
   pure $ view inputDispatcher state
   where
   view inputDispatcher state =
@@ -101,4 +101,4 @@ task onDelete' =
 
   onCompleted event = _completed .= event.checked
 
-  onDelete = unwrap2 onDelete'
+  onDelete = onDelete'

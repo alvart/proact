@@ -18,21 +18,17 @@
 -- | actual GUI.
 
 module Proact
-( Action
-, Component
+( Component
 , EventHandler
-, EventHandle
 , EventDispatcher
 , ReactContext
 , eventDispatcher
 , focus
 , focus'
-, noAction
 , spec
 )
 where
 
-import Control.Apply (lift2)
 import Control.Coroutine (Consumer, Producer, Await(..), Emit(..), await, emit)
 import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler)
 import Control.Monad.Eff (Eff)
@@ -76,19 +72,14 @@ import React
   )
   as React
 
--- | An monoidal representation of applicative actions appended in sequence.
-newtype Action fx = Action (Eff (ReactContext fx) Unit)
-
 -- | A monadic representation of a component's GUI that provides access to its
 -- | state through the `MonadAsk` interface.
 newtype Component fx state a =
   Component (Engine (ReaderT (This fx state) (Eff fx)) a state state)
 
 -- | A monadic representation of an event handler that manipulates the
--- | component's state through the `MonadState` interface and to the event data
--- | through the `MonadAsk` interface.
-newtype EventHandler fx state event a =
-  EventHandler (Engine (ReaderT event (Aff fx)) a state state)
+-- | component's state through the `MonadState` interface.
+newtype EventHandler fx state a = EventHandler (Engine (Aff fx) a state state)
 
 -- A component representation of the Profunctor, Strong, Choice and Wander type
 -- classes.
@@ -103,11 +94,11 @@ data This fx state =
 -- | An event object may be later provided to the handler to trigger an event
 -- | action.
 type EventDispatcher fx state event =
-  Component fx state (EventHandler fx state event Unit -> EventHandle fx event)
-
--- | A type synonym for the target of an event handler that listens for a
--- | specific event and then triggers an action.
-type EventHandle fx event = event -> Action fx
+  Component fx state
+    (
+       (event -> EventHandler fx state Unit)
+    -> (event -> Eff (ReactContext fx) Unit)
+    )
 
 -- | A type synonym for effects associated to React components.
 type ReactContext fx =
@@ -130,17 +121,6 @@ type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
 -- A type synonym for the producer/consumer stack that is the engine behind all
 -- components.
 type Engine m a _in out = Producer out (Consumer _in m) a
-
--- Action :: NewType, SemiGroup, Monoid
-derive instance newtypeAction :: Newtype (Action fx) _
-
-instance semigroupAction :: Semigroup (Action fx)
-  where
-  append (Action a1) (Action a2) = Action $ lift2 append a1 a2
-
-instance monoidAction :: Monoid (Action fx)
-  where
-  mempty = Action $ pure mempty
 
 -- ProComponent :: NewType, Profunctor, Strong, Choice, Wander
 derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
@@ -286,21 +266,21 @@ instance wanderProComponent
 --   , MonadAsk
 --   , MonadEff
 --   , MonadState
-derive instance newtypeEventHandler :: Newtype (EventHandler fx state event a) _
+derive instance newtypeEventHandler :: Newtype (EventHandler fx state a) _
 
-instance functorEventHandler :: Functor (EventHandler fx state event)
+instance functorEventHandler :: Functor (EventHandler fx state)
   where
   map f (EventHandler fa) = EventHandler $ map f fa
 
-instance applyEventHandler :: Apply (EventHandler fx state event)
+instance applyEventHandler :: Apply (EventHandler fx state)
   where
   apply = ap
 
-instance applicativeEventHandler :: Applicative (EventHandler fx state event)
+instance applicativeEventHandler :: Applicative (EventHandler fx state)
   where
   pure a = EventHandler $ pure a
 
-instance bindEventHandler :: Bind (EventHandler fx state event)
+instance bindEventHandler :: Bind (EventHandler fx state)
   where
   bind (EventHandler ma) f =
     EventHandler
@@ -308,18 +288,13 @@ instance bindEventHandler :: Bind (EventHandler fx state event)
       EventHandler mb <- map f ma
       mb
 
-instance monadEventHandler :: Monad (EventHandler fx state event)
+instance monadEventHandler :: Monad (EventHandler fx state)
 
-instance monadAskEventHandler :: MonadAsk event (EventHandler fx state event)
+instance monadEffEventHandler :: MonadEff fx (EventHandler fx state)
   where
-  ask = EventHandler $ lift $ lift ask
+  liftEff = EventHandler <<< lift <<< lift <<< liftEff
 
-instance monadEffEventHandler :: MonadEff fx (EventHandler fx state event)
-  where
-  liftEff = EventHandler <<< lift <<< lift <<< lift <<< liftEff
-
-instance monadStateEventHandler
-  :: MonadState state (EventHandler fx state event)
+instance monadStateEventHandler :: MonadState state (EventHandler fx state)
   where
   state f =
     EventHandler
@@ -385,14 +360,13 @@ eventDispatcher =
     this <- lift $ lift ask
     pure $ dispatcher this
   where
-  dispatcher this (EventHandler engine) event =
-    Action $ unsafeCoerceEff $ launchAff_ dispatch
+  dispatcher this eventHandler event = unsafeCoerceEff $ launchAff_ dispatch
     where
-    dispatch = tailRecM stepProducer engine
+    dispatch = tailRecM stepProducer $ unwrap $ eventHandler event
 
     stepConsumer consumer =
       do
-      step <- resume consumer `runReaderT` event
+      step <- resume consumer
       case step
         of
         Left a -> pure $ Done a
@@ -462,10 +436,6 @@ focus' _lens (Component engine) = Component $ (unwrap $ _lens profunctor) 0
       pure $ view _lens state1
 
   profunctor = ProComponent \index -> hoistEngine (withReaderT focusThis) engine
-
--- | Creates a default action with no side-effects.
-noAction :: forall fx . Action fx
-noAction = Action $ pure mempty
 
 -- | Creates a `ReactSpec` from a Proact Component.
 spec

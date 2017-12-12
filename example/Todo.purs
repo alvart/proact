@@ -46,7 +46,7 @@ import React.DOM.Props
   (className, onChange, onClick, onKeyUp, placeholder, value) as R
 import Task as Task
 import Unsafe.Coerce (unsafeCoerce)
-import Utility (ReactHandler, (..), unwrap3, use')
+import Utility (ReactHandler, (..), use')
 
 -- | The three filters which can be applied to the list of tasks.
 data Filter =
@@ -105,7 +105,7 @@ filterBar :: forall fx . P.Component fx State R.ReactElement
 filterBar =
   do
   state <- ask
-  clickDispatcher <- unwrap3 <$> P.eventDispatcher
+  clickDispatcher <- P.eventDispatcher
 
   pure $ view clickDispatcher state
   where
@@ -144,7 +144,7 @@ taskBox :: forall fx . P.Component fx State R.ReactElement
 taskBox =
   do
   state <- ask
-  inputDispatcher <- unwrap3 <$> P.eventDispatcher
+  inputDispatcher <- P.eventDispatcher
 
   pure $ view inputDispatcher state
   where

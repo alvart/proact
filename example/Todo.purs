@@ -105,17 +105,17 @@ filterBar :: forall fx . P.Component fx State R.ReactElement
 filterBar =
   do
   state <- ask
-  clickDispatcher <- P.eventDispatcher
+  dispatcher <- P.eventDispatcher
 
-  pure $ view clickDispatcher state
+  pure $ view dispatcher state
   where
-  view clickDispatcher state =
+  view dispatcher state =
     R.div [R.className "btn-group"] $ map filterButton [All, Active, Completed]
     where
     filterButton filter' =
       R.button
         [ R.className className
-        , R.onClick $ clickDispatcher onFilterChanged
+        , R.onClick $ dispatcher onFilterChanged
         ]
         [R.text $ show filter']
       where
@@ -144,11 +144,11 @@ taskBox :: forall fx . P.Component fx State R.ReactElement
 taskBox =
   do
   state <- ask
-  inputDispatcher <- P.eventDispatcher
+  dispatcher <- P.eventDispatcher
 
-  pure $ view inputDispatcher state
+  pure $ view dispatcher state
   where
-  view inputDispatcher state =
+  view dispatcher state =
     R.input
       [ R.className "form-control"
       , R.placeholder "Create a new task"
@@ -157,12 +157,12 @@ taskBox =
         R.onKeyUp
           $ unsafeCoerce
           $ lmap fromInputEvent
-          $ inputDispatcher onNewTaskEnter
+          $ dispatcher onNewTaskEnter
       ,
         R.onChange
           $ unsafeCoerce
           $ lmap fromInputEvent
-          $ inputDispatcher onTextChanged
+          $ dispatcher onTextChanged
       ]
       []
     where
@@ -190,13 +190,13 @@ taskTable :: forall fx . P.Component fx State R.ReactElement
 taskTable =
   do
   filter' <- use' _filter
-  deleteDispatcher <- P.eventDispatcher
+  dispatcher <- P.eventDispatcher
 
   taskBoxView <- taskBox
   tasksView <-
     P.focus (_tasks .. traversed)
       $ filteredTask (taskFilter filter')
-      $ deleteDispatcher onDelete
+      $ dispatcher onDelete
 
   pure $ view taskBoxView tasksView
   where

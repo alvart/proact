@@ -70,13 +70,13 @@ _index = _Newtype .. lens _.index (_ { index = _ })
 -- | The task component.
 task
   :: forall fx . ReactHandler fx Int -> P.Component fx State R.ReactElement
-task onDelete' =
+task onDelete =
   do
   state <- ask
-  inputDispatcher <- P.eventDispatcher
-  pure $ view inputDispatcher state
+  dispatcher <- P.eventDispatcher
+  pure $ view dispatcher state
   where
-  view inputDispatcher state =
+  view dispatcher state =
     (R.tr' .. map (R.td' .. singleton))
       [
         R.input
@@ -84,7 +84,7 @@ task onDelete' =
           , R.className "checkbox"
           , R.checked $ state ^. _completed
           , R.title "Mark as completed"
-          , R.onChange $ lmap fromInputEvent $ inputDispatcher onCompleted
+          , R.onChange $ lmap fromInputEvent $ dispatcher onCompleted
           ]
           []
       , R.text $ state ^. _description
@@ -100,5 +100,3 @@ task onDelete' =
   fromInputEvent event = { checked : (unsafeCoerce event).target.checked }
 
   onCompleted event = _completed .= event.checked
-
-  onDelete = onDelete'

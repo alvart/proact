@@ -71,6 +71,7 @@ import React
   , writeStateWithCallback
   )
   as React
+import Unsafe.Coerce (unsafeCoerce)
 
 -- | A monadic representation of a component's GUI that provides access to its
 -- | state through the `MonadAsk` interface.
@@ -93,12 +94,10 @@ data This fx state =
 -- | A type synonym for an event handler that is accessible from a Component.
 -- | An event object may be later provided to the handler to trigger an event
 -- | action.
-type EventDispatcher fx state event =
-  Component fx state
-    (
-       (event -> EventHandler fx state Unit)
-    -> (event -> Eff (ReactContext fx) Unit)
-    )
+type EventDispatcher fx state =
+  forall event
+   . (event -> EventHandler fx state Unit)
+  -> (event -> Eff (ReactContext fx) Unit)
 
 -- | A type synonym for effects associated to React components.
 type ReactContext fx =
@@ -353,13 +352,19 @@ instance monadEffComponent :: MonadEff fx (Component fx state)
 -- | Retrieves an event handler from the current UI context. Once this handler
 -- | receives an event component and an event it will trigger the actions
 -- | contained in the monadic side-effects (asynchronous).
-eventDispatcher :: forall fx state event . EventDispatcher fx state event
+eventDispatcher
+  :: forall fx state . Component fx state (EventDispatcher fx state)
 eventDispatcher =
   Component
     do
     this <- lift $ lift ask
-    pure $ dispatcher this
+    pure $ unsafeCoerce $ dispatcher this
   where
+  dispatcher
+    :: forall event
+     . This fx state
+    -> (event -> EventHandler fx state Unit)
+    -> (event -> Eff (ReactContext fx) Unit)
   dispatcher this eventHandler event = unsafeCoerceEff $ launchAff_ dispatch
     where
     dispatch = tailRecM stepProducer $ unwrap $ eventHandler event

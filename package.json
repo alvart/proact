@@ -35,5 +35,5 @@
     "browserify": "pulp browserify --src-path example --include src --to html/index.js && create-html -t \"Proact Example\" -c \"https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css\" -s \"index.js\" -b \"<div id=\\\"app\\\"></div>\" -o html/index.html",
     "build": "pulp build"
   },
-  "version": "0.1.0"
+  "version": "0.0.0"
 }

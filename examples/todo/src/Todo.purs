@@ -4,32 +4,33 @@
 -}
 
 module Todo
-( Filter
-, State
+( State(..)
 , _filter
 , _taskDescription
 , _tasks
+, mempty'
 , todo
 )
 where
 
-import Control.Monad.Eff.Exception.Unsafe (unsafeThrow)
 import Control.Monad.Reader (ask, asks)
-import Data.Array (deleteAt, filter, length, singleton, snoc)
+import Data.Array ((:), deleteAt, filter, length, singleton, snoc)
 import Data.Identity (Identity)
 import Data.Lens (Lens', (%=), (.=), (.~), (^.), lens, traversed)
 import Data.Lens.Iso.Newtype (_Newtype)
-import Data.Maybe (Maybe(..))
-import Data.Monoid (class Monoid, mempty)
+import Data.Maybe (fromJust)
+import Data.Monoid (mempty)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Profunctor (lmap)
 import Data.TraversableWithIndex (traverseWithIndex)
+import FilterMenu (Filter(..), filterMenu) as Filter
+import Partial.Unsafe (unsafePartial)
 import Prelude
 import Proact as P
+import ProactPlus (ReactHandler, (..), use')
 import React (ReactElement) as R
 import React.DOM
   ( br'
-  , button
   , div
   , h1'
   , input
@@ -42,53 +43,23 @@ import React.DOM
   , thead'
   , tr'
   ) as R
-import React.DOM.Props
-  (className, onChange, onClick, onKeyUp, placeholder, value) as R
+import React.DOM.Props (className, onChange, onKeyUp, placeholder, value) as R
 import Task as Task
 import Unsafe.Coerce (unsafeCoerce)
-import Utility (ReactHandler, (..), use')
-
--- | The three filters which can be applied to the list of tasks.
-data Filter =
-  Active
-  | All
-  | Completed
 
 -- | The state of the to-do application.
 newtype State =
   State
-    { filter :: Filter
+    { filter :: Filter.Filter
     , taskDescription :: String
     , tasks :: Array Task.State
     }
 
--- State :: NewType, SemiGroup, Monoid
+-- State :: NewType
 derive instance newtypeState :: Newtype (State) _
 
-instance semigroupState :: Semigroup (State)
-  where
-  append _ _ = unsafeThrow "To-do app doesn't support `append`"
-
-instance monoidState :: Monoid (State)
-  where
-  mempty =
-    State
-      { filter : All
-      , taskDescription : ""
-      , tasks : []
-      }
-
--- Filter :: Eq, Show
-derive instance eqFilter :: Eq (Filter)
-
-instance showFilter :: Show (Filter)
-  where
-  show All = "All"
-  show Active = "Active"
-  show Completed = "Completed"
-
 -- | Gets or sets the task filter.
-_filter :: Lens' State Filter
+_filter :: Lens' State Filter.Filter
 _filter = _Newtype .. lens _.filter (_ { filter = _ })
 
 -- | Gets or sets the description of the new task to be added.
@@ -99,32 +70,6 @@ _taskDescription =
 -- | Gets or sets the list of tasks.
 _tasks :: Lens' State (Array Task.State)
 _tasks = _Newtype .. lens _.tasks (_ { tasks = _ })
-
--- The top-bar to select filtering options for the tasks.
-filterBar :: forall fx . P.Component fx State R.ReactElement
-filterBar =
-  do
-  state <- ask
-  dispatcher <- P.eventDispatcher
-
-  pure $ view dispatcher state
-  where
-  view dispatcher state =
-    R.div [R.className "btn-group"] $ map filterButton [All, Active, Completed]
-    where
-    filterButton filter' =
-      R.button
-        [ R.className className
-        , R.onClick $ dispatcher onFilterChanged
-        ]
-        [R.text $ show filter']
-      where
-      className =
-        if filter' == state ^. _filter
-        then "btn toolbar active"
-        else "btn toolbar"
-
-      onFilterChanged _ = _filter .= filter'
 
 -- A task to which a filter has been applied.
 filteredTask
@@ -137,7 +82,16 @@ filteredTask filter' onDelete =
   visible <- asks filter'
   if visible
     then singleton <$> Task.task onDelete
-    else pure []
+    else pure [ ]
+
+-- | The initial state of the component.
+mempty' :: State
+mempty' =
+  State
+    { filter : Filter.All
+    , taskDescription : ""
+    , tasks : [ ]
+    }
 
 -- A task to which a filter has been applied.
 taskBox :: forall fx . P.Component fx State R.ReactElement
@@ -212,22 +166,20 @@ taskTable =
               , R.th [R.className "col-md-1"] []
               ]
           ]
-      ,
-        R.tbody'
-          $ [R.tr' [R.td' [], R.td' [taskBoxView], R.td' []]] <> tasksView
+      , R.tbody' $ R.tr' [R.td' [], R.td' [taskBoxView], R.td' []] : tasksView
       ]
 
-  taskFilter All _ = true
-  taskFilter Completed task = task ^. Task._completed
-  taskFilter Active task = not $ task ^. Task._completed
+  taskFilter Filter.All _ = true
+  taskFilter Filter.Completed task = task ^. Task._completed
+  taskFilter Filter.Active task = not $ task ^. Task._completed
 
   onDelete index = _tasks %= deleteTaskAt index
 
   deleteTaskAt index array =
-    case deleteAt index array
-      of
-      Just array' -> unwrap $ traverseWithIndex resetIndex array'
-      Nothing -> array
+    (unwrap <<< unsafePartial)
+      do
+      let array' = fromJust $ deleteAt index array
+      traverseWithIndex resetIndex array'
 
   resetIndex :: Int -> Task.State -> Identity Task.State
   resetIndex index task = pure $ task # Task._index .~ index
@@ -237,20 +189,20 @@ todo :: forall fx . P.Component fx State R.ReactElement
 todo =
   do
   state <- ask
-  filterBarView <- filterBar
+  filterMenuView <- P.focus' _filter Filter.filterMenu
   taskTableView <- taskTable
 
-  pure $ view state filterBarView taskTableView
+  pure $ view state filterMenuView taskTableView
   where
-  view state filterBarView taskTableView =
+  view state filterMenuView taskTableView =
     R.div
-      [R.className "container"]
-      [ R.h1' [R.text "To-do App"]
-      , filterBarView
-      , R.br' []
-      , R.br' []
+      [ R.className "container" ]
+      [ R.h1' [ R.text "To-do App" ]
+      , filterMenuView
+      , R.br' [ ]
+      , R.br' [ ]
       , taskTableView
-      , R.p' [R.text $ totalCompleted <> "/" <> total <> " tasks completed."]
+      , R.p' [ R.text $ totalCompleted <> "/" <> total <> " tasks completed." ]
       ]
     where
     tasks = state ^. _tasks

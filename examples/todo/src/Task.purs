@@ -4,7 +4,7 @@
 -}
 
 module Task
-( State
+( State(..)
 , _completed
 , _description
 , _index
@@ -25,8 +25,8 @@ import React.DOM.Props
   (_type, checked, className, onChange, onClick, title) as R
 import Prelude
 import Proact as P
+import ProactPlus (ReactHandler, (..))
 import Unsafe.Coerce (unsafeCoerce)
-import Utility (ReactHandler, (..))
 
 -- | The state of a task component.
 newtype State =
@@ -94,7 +94,7 @@ task onDelete =
           , R.title "Remove item"
           , R.onClick \_ -> onDelete $ state ^. _index
           ]
-          [R.text "✖"]
+          [ R.text "✖" ]
       ]
 
   fromInputEvent event = { checked : (unsafeCoerce event).target.checked }

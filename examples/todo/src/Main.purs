@@ -8,7 +8,6 @@ where
 
 import Control.Monad.Eff (Eff)
 import Data.Maybe (fromJust)
-import Data.Monoid (mempty)
 import DOM (DOM)
 import DOM.HTML (window) as D
 import DOM.HTML.Window (document) as D
@@ -28,7 +27,7 @@ import React
   )
   as R
 import ReactDOM (render) as R
-import Todo (todo)
+import Todo (todo, mempty') as Todo
 
 type ReactFx =
   ( dom :: DOM
@@ -41,8 +40,8 @@ main :: Eff ReactFx Unit
 main =
   unsafePartial
     do
-    let spec = P.spec todo mempty
-    let element = flip R.createFactory {} $ R.createClass spec
+    let spec = P.spec Todo.todo Todo.mempty'
+    let element = flip R.createFactory { } $ R.createClass spec
     rDocument <- map D.htmlDocumentToParentNode $ D.window >>= D.document
     rApp <- fromJust <$> D.querySelector (D.QuerySelector "#app") rDocument
     void $ R.render element rApp

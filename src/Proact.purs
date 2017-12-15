@@ -130,7 +130,7 @@ instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
     ProComponent
       \index -> bimapFreeT (B.lmap g) (interpret (lmap f)) $ indexEngine index
 
-instance strengthenProComponent
+instance strongProComponent
   :: (Monad m, MonadRec m) => Strong (ProComponent m a)
   where
   first component = strengthen (flip Tuple <<< snd) $ lmap fst component
@@ -277,15 +277,11 @@ instance applyEventHandler :: Apply (EventHandler fx state)
 
 instance applicativeEventHandler :: Applicative (EventHandler fx state)
   where
-  pure a = EventHandler $ pure a
+  pure = EventHandler <<< pure
 
 instance bindEventHandler :: Bind (EventHandler fx state)
   where
-  bind (EventHandler ma) f =
-    EventHandler
-      do
-      EventHandler mb <- map f ma
-      mb
+  bind (EventHandler ma) f = EventHandler $ map f ma >>= unwrap
 
 instance monadEventHandler :: Monad (EventHandler fx state)
 
@@ -328,11 +324,7 @@ instance applicativeComponent :: Applicative (Component fx state)
 
 instance bindComponent :: Bind (Component fx state)
   where
-  bind (Component ma) f =
-    Component
-      do
-      Component mb <- map f ma
-      mb
+  bind (Component ma) f = Component $ map f ma >>= unwrap
 
 instance monadComponent :: Monad (Component fx state)
 
@@ -347,7 +339,7 @@ instance monadAskComponent :: MonadAsk state (Component fx state)
 
 instance monadEffComponent :: MonadEff fx (Component fx state)
   where
-  liftEff = Component <<< lift <<< lift <<< lift <<< liftEff
+  liftEff = Component <<< lift <<< lift <<< lift
 
 -- | Retrieves an event handler from the current UI context. Once this handler
 -- | receives an event component and an event it will trigger the actions
@@ -546,7 +538,7 @@ push (ReactThis this) state = makeAff _push
       $ Right unit
     pure nonCanceler
 
--- An abstraction of the `React.readState` function exposing an asynchronous
+-- An abstraction of the `React.readState` function exposing a synchronous
 -- facade.
 read :: forall fx state . This fx state -> Eff fx state
 read (This _ _read) = _read

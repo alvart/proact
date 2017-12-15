@@ -25,7 +25,7 @@ npm run build
 ## Testing
 
 ```sh
-npm run browserify
+npm run demo:todo
 ```
 
 Once the Proact library and the example code is compiled, an index.js file will be generated in the html directory of this project, open the web page in a browser to see it running.
@@ -34,10 +34,14 @@ Once the Proact library and the example code is compiled, an index.js file will 
 
 Creating components in Proact is meant to be quick and simple:
 
-1. Define the state type of your component.
-2. Fetch the state of the component.
-3. Fetch an event handler that the HTML controls will pass messages to.
-4. Define the event actions to be triggered once an event is fired.
-5. Create a GUI based on the state and link its HTML controls to their event logic.
+1. Define the state of your component.
+2. Define a GUI that renders according to the state.
+3. Fetch the state and pass it on to the GUI.
+4. Define event handlers that will change the state of the component as a response to HTML control events.
+5. Fetch an event dispatcher and use it to link handlers and HTML controls together.
 
 Once you're app components are defined, integrate them simply and elegantly by `focus`ing on them from their parent component. Focusing only requires a lens function which is usually very easy to define for most state types.
+
+## Examples
+
+- [To-do Application](https://github.com/alvart/proact/tree/master/examples/todo). The "Hello World!" of web applications.

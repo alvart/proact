@@ -576,5 +576,5 @@ You can check how to do all this by looking into the source repository for this 
 
 I hope this exercise helps you understand how easy is to write applications with Proact and, who knows, maybe even motivates you to write your next big project on it.
 
-Cheers,
+Cheers
 :)

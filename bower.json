@@ -1,5 +1,5 @@
 {
-  "authors": "Jon Alvart <code.alvart@gmail.com>",
+  "author": "Jon Alvart <code.alvart@gmail.com>",
   "dependencies": {
     "purescript-aff": "^4.0.0",
     "purescript-coroutines": "^4.0.0",

@@ -25,6 +25,7 @@ where
 
 import Control.Coroutine (Consumer, Producer, Await(..), Emit(..), await, emit)
 import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler)
+import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
@@ -257,6 +258,7 @@ instance wanderProComponent
 --   , Bind
 --   , Monad
 --   , MonadAsk
+--   , MonadAff
 --   , MonadEff
 --   , MonadState
 derive instance newtypeEventHandler :: Newtype (EventHandler fx state a) _
@@ -278,6 +280,10 @@ instance bindEventHandler :: Bind (EventHandler fx state)
   bind (EventHandler ma) f = EventHandler $ map f ma >>= unwrap
 
 instance monadEventHandler :: Monad (EventHandler fx state)
+
+instance monadAffEventHandler :: MonadAff fx (EventHandler fx state)
+  where
+  liftAff = EventHandler <<< lift <<< lift <<< liftAff
 
 instance monadEffEventHandler :: MonadEff fx (EventHandler fx state)
   where

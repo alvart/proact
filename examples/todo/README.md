@@ -302,7 +302,7 @@ task onDelete =
 
 Just as explained eariler, we request an event handler to deal with the delete event and we send to it the index of the current task so that it knows where to remove it from. The event that responds to the checkbox control is interesting:
 
-As it turns out, Proact is incapable of reading the DOM elements of the GUI and because of the asynchronous nature of the event handlers and the fact Proact is built on top of React, we cannot access the event data from the context of the event handlers. To work around these two problems we change the type of the checkbox event with `lmap` which is like a backwards `map` for function arguments (or contravariant types, in general). At this point, that is, when changing the event type, we do have access to the event data which among other stuff includes the DOM element that generated the event. From this we can read its checked/unchecked status and pass it to Proact's event handler.
+As it turns out, Proact is incapable of reading the DOM elements of the GUI and because of the asynchronous nature of the event handlers and the fact Proact is built on top of React, we cannot access the event data from the context of the event handlers. To work around these two problems we change the type of the checkbox event with `lmap` which is like a backwards `map` for function arguments (or contravariant types, in general). At this point, that is, when changing the event type, we do have access to the event data which among other stuff includes the DOM element that generated the event and consequently its checked/unchecked status.
 
 Our check/uncheck handler is the following one-liner:
 
@@ -400,12 +400,12 @@ This time I also included the event handlers together with the GUI but hopefully
 
 1. We define the component as an input box to enter the new task description.
 2. We subscribe to two different events from this control:
-  ..- The key-up event to detect whether the <kbd>ENTER</kbd> or <kbd>ESC</kbd> keys were pressed.
-  ..- The change event to detect whenever the text inside the box was changed.
+    * The key-up event to detect whether the <kbd>ENTER</kbd> or <kbd>ESC</kbd> keys were pressed.
+    * The change event to detect whenever the text inside the box was changed.
 3. We add event handlers to respond to the events by:
-  ..- Clearing the new task description if <kbd>ESC</kbd> key was pressed.
-  ..- Adding the new task to the list if <kbd>ENTER</kbd> key was pressed.
-  ..- Updating the text description when the text inside the input box is changed.
+    * Clearing the new task description if <kbd>ESC</kbd> key was pressed.
+    * Adding the new task to the list if <kbd>ENTER</kbd> key was pressed.
+    * Updating the text description when the text inside the input box is changed.
 
 ### Building a task... again
 

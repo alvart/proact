@@ -10,12 +10,6 @@
 -- | that use messages to communicate components, Proact dispatches event
 -- | actions themselves which means there is less boilerplate code and more
 -- | rapid development.
--- |
--- | The components work on an underlying asynchronous layer which allows for
--- | cleaner asynchronous code but has the side effect that the rendering of
--- | the component will be delayed. Because of this, the user is encouraged to
--- | provide a "splash screen" that will show while the component loads the
--- | actual GUI.
 
 module Proact
 ( Component

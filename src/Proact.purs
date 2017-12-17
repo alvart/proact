@@ -154,7 +154,7 @@ instance wanderProComponent
   :: (Monad m, MonadRec m, Monoid a) => Wander (ProComponent m a)
   where
   wander traversal (ProComponent indexEngine) =
-    ProComponent \_ ->
+    ProComponent \index ->
       do
       -- Request input (a collection of states) and use it to gather the last
       -- emitted value of every child component until its co-routine either
@@ -165,7 +165,7 @@ instance wanderProComponent
         lift
           $ lift
           $ runWriterT
-          $ flip evalStateT 0
+          $ flip evalStateT index
           $ traversal initAwaitBlock in2
 
       -- Yield the collection of states assembled in the last step.

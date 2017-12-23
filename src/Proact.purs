@@ -43,12 +43,14 @@ import Data.Array.Partial (head, tail)
 import Data.Bifunctor (lmap, rmap) as B
 import Data.Either (Either(..), fromLeft, isRight)
 import Data.Foldable (any, fold)
+import Data.Lens (class Wander, Lens', Traversal', element, set, view)
+import Data.Lens.Indexed (positions)
+import Data.Lens.Internal.Indexed (Indexed(..))
 import Data.Monoid (class Monoid, mempty)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Profunctor (class Profunctor, lmap, rmap)
 import Data.Profunctor.Choice (class Choice)
 import Data.Profunctor.Strong (class Strong)
-import Data.Lens (class Wander, Lens', Traversal', element, set, view)
 import Data.Tuple (Tuple(..), fst, snd)
 import Partial.Unsafe (unsafePartial)
 import Prelude
@@ -79,7 +81,7 @@ newtype EventHandler fx state a = EventHandler (Engine (Aff fx) a state state)
 
 -- A component representation of the Profunctor, Strong, Choice and Wander type
 -- classes.
-newtype ProComponent m a _in out = ProComponent (Int -> Engine m a _in out)
+newtype ProComponent m a _in out = ProComponent (Engine m a _in out)
 
 -- A composable representation of the underlying react `this` object.
 data This fx state =
@@ -105,7 +107,7 @@ type ReactContext fx =
 -- A type synonym for the consumer co-routine at the first layer of a
 -- producer/consumer stack.
 type AwaitBlock m a _in out =
-  Consumer _in m (Either a (Emit out (Producer out (Consumer _in m) a)))
+  Consumer _in m (Either a (Emit out (Engine m a _in out)))
 
 -- A type synonym for the consumer co-routine at the first layer of a
 -- producer/consumer stack that returns whether a Choice profunctor should yield
@@ -121,9 +123,8 @@ derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
 
 instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
   where
-  dimap f g (ProComponent indexEngine) =
-    ProComponent
-      \index -> bimapFreeT (B.lmap g) (interpret (lmap f)) $ indexEngine index
+  dimap f g (ProComponent engine) =
+    ProComponent $ bimapFreeT (B.lmap g) (interpret (lmap f)) engine
 
 instance strongProComponent
   :: (Monad m, MonadRec m) => Strong (ProComponent m a)
@@ -135,17 +136,14 @@ instance strongProComponent
 instance choiceProComponent
   :: (Monad m, MonadRec m, Monoid a) => Choice (ProComponent m a)
   where
-  left (ProComponent indexEngine) =
-    choose selectLeft $ rmap Left $ ProComponent $ map (map Right) indexEngine
+  left (ProComponent engine) =
+    choose selectLeft $ rmap Left $ ProComponent $ map Right engine
     where
     selectLeft (Await awaitNext) (Left in1) = awaitNext in1
     selectLeft _ (Right a) = pure $ Left $ Left (Right a)
 
-  right (ProComponent indexEngine) =
-    choose selectRight
-      $ rmap Right
-      $ ProComponent
-      $ map (map Right) indexEngine
+  right (ProComponent engine) =
+    choose selectRight $ rmap Right $ ProComponent $ map Right engine
     where
     selectRight (Await awaitNext) (Right in1) = awaitNext in1
     selectRight _ (Left a) = pure $ Left $ Left (Left a)
@@ -153,8 +151,8 @@ instance choiceProComponent
 instance wanderProComponent
   :: (Monad m, MonadRec m, Monoid a) => Wander (ProComponent m a)
   where
-  wander traversal (ProComponent indexEngine) =
-    ProComponent \index ->
+  wander traversal (ProComponent engine) =
+    ProComponent
       do
       -- Request input (a collection of states) and use it to gather the last
       -- emitted value of every child component until its co-routine either
@@ -162,11 +160,7 @@ instance wanderProComponent
       in2 <- lift await
 
       Tuple out2 pendingBlocks <-
-        lift
-          $ lift
-          $ runWriterT
-          $ flip evalStateT index
-          $ traversal initAwaitBlock in2
+        lift $ lift $ runWriterT $ traversal initAwaitBlock in2
 
       -- Yield the collection of states assembled in the last step.
       emit out2
@@ -191,7 +185,7 @@ instance wanderProComponent
         lift
           case awaitBlock
             of
-            Left (Tuple a out1) -> tell [Left $ Tuple a out1] *> pure out1
+            Left (Tuple a out1) -> tell [ Left $ Tuple a out1 ] *> pure out1
             Right (Await awaitNext) -> completeAwait $ awaitNext in1
 
     clearAwaitBlockList =
@@ -228,27 +222,23 @@ instance wanderProComponent
         step <- lift $ resume $ resume producer
         case step
           of
-          Left (Left a) -> tell [Left $ Tuple a out1] *> pure out1
-          Right awaitBlock -> tell [Right awaitBlock] *> pure out1
+          Left (Left a) -> tell [ Left $ Tuple a out1 ] *> pure out1
+          Right awaitBlock -> tell [ Right awaitBlock ] *> pure out1
 
     initAwaitBlock in1 =
       unsafePartial
         do
-        index <- get
-        put $ index + 1
-
         -- Make a copy of the initial component for every input state, then if
         -- it immediately blocks awaiting for more input use the data from the
         -- original request to resume the co-routine, otherwise return the last
         -- yielded value before the co-routine completed or blocked.
         -- It is assumed that each component will perform at least one yield
         -- operation before completing or blocking.
-        step <- lift $ lift $ resume $ resume $ indexEngine index
-        lift
-          case step
-            of
-            Left (Right (Emit out1 emitNext)) -> completeEmit out1 emitNext
-            Right (Await awaitNext) -> completeAwait $ awaitNext in1
+        step <- lift $ resume $ resume engine
+        case step
+          of
+          Left (Right (Emit out1 emitNext)) -> completeEmit out1 emitNext
+          Right (Await awaitNext) -> completeAwait $ awaitNext in1
 
 -- EventHandler
 --  :: NewType
@@ -393,7 +383,7 @@ focus
   -> Component fx state2 render
   -> Component fx state1 render
 focus _traversal (Component engine) =
-  Component $ (unwrap $ _traversal profunctor) 0
+  Component $ unwrap $ positions _traversal profunctor
   where
   focusThis index this = This _push _read
     where
@@ -407,9 +397,21 @@ focus _traversal (Component engine) =
       state1 <- read this
       pure $ view (element index _traversal) state1
 
+  initProducer index state2 producer =
+    freeT \_ -> freeT \_ ->
+      unsafePartial
+        do
+        Right (Await awaitNext) <-
+          resume
+            $ resume
+            $ hoistEngine (withReaderT (\this -> focusThis index this)) producer
+        resume $ awaitNext $ Tuple index state2
+
   profunctor =
-    ProComponent \index ->
-      hoistEngine (withReaderT \this -> focusThis index this) engine
+    (Indexed <<< ProComponent)
+      do
+      Tuple index state2 <- lift await
+      initProducer index state2 $ hoistFreeT (interpret (lmap snd)) engine
 
 -- | Changes a component's state type through a lens.
 -- | For a more general albeit more restrictive version, consider `focus`.
@@ -418,7 +420,7 @@ focus'
    . Lens' state1 state2
   -> Component fx state2 render
   -> Component fx state1 render
-focus' _lens (Component engine) = Component $ (unwrap $ _lens profunctor) 0
+focus' _lens (Component engine) = Component $ unwrap $ _lens profunctor
   where
   focusThis this = This _push _read
     where
@@ -432,7 +434,7 @@ focus' _lens (Component engine) = Component $ (unwrap $ _lens profunctor) 0
       state1 <- read this
       pure $ view _lens state1
 
-  profunctor = ProComponent \index -> hoistEngine (withReaderT focusThis) engine
+  profunctor = ProComponent $ hoistEngine (withReaderT focusThis) engine
 
 -- | Creates a `ReactSpec` from a Proact Component.
 spec
@@ -487,8 +489,8 @@ choose
      )
   -> ProComponent m (Either out a) in1 out
   -> ProComponent m a in2 out
-choose select (ProComponent indexEngine) =
-  ProComponent \index -> stepOutProducer $ stepInProducer $ indexEngine index
+choose select (ProComponent engine) =
+  ProComponent $ stepOutProducer $ stepInProducer engine
   where
   stepConsumer consumer =
     freeT \_ ->
@@ -555,8 +557,7 @@ strengthen
   => (_in -> out1 -> out2)
   -> ProComponent m b _in out1
   -> ProComponent m b _in out2
-strengthen emit' (ProComponent indexEngine) =
-  ProComponent \index -> stepProducer $ indexEngine index
+strengthen emit' (ProComponent engine) = ProComponent $ stepProducer engine
   where
   completeAwait awaitBlock _in =
     freeT \_ -> unsafePartial

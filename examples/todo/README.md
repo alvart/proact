@@ -407,31 +407,17 @@ This time I also included the event handlers together with the GUI but hopefully
     * Adding the new task to the list if <kbd>ENTER</kbd> key was pressed.
     * Updating the text description when the text inside the input box is changed.
 
-### Building a task... again
+### Filtering the tasks
 
-Wait, I thought we already had a component for this, right?
+For this application we need to decide whether to show a task or not depending on the filter that was selected, for example if the active filter indicates that we need to display completed tasks then we better hide any other task that's still pending.
 
-Not quite, for this application we need to filter tasks and decide whether to show them or not depending on the active filter so we're forced to create a new component that handles this behavior.
-
-It would be nice if we didn't have to create a new component for this and rely on the parent that contains the task collection to handle the operation. There's even a [lens for it](https://pursuit.purescript.org/packages/purescript-profunctor-lenses/3.8.0/docs/Data.Lens.Fold#v:filtered), unfortunately, Proact at this moment has a limitation when working with Prisms and Traversal lenses at the same time and the filtering lens just so happen to be built on top of both of these :(
-
-Alas, we have to build a filtered task:
+Fortunately, there's a lens that does exactly [what we need](https://pursuit.purescript.org/packages/purescript-profunctor-lenses/3.8.0/docs/Data.Lens.Fold#v:filtered):
 
 ```purescript
-filteredTask
-  :: forall fx
-   . (Task.State -> Boolean)
-  -> ReactHandler fx Int
-  -> Component fx Task.State (Array ReactElement)
-filteredTask filter' onDelete =
-  do
-  visible <- asks filter'
-  if visible
-    then singleton <$> Task.task onDelete
-    else pure [ ]
+filtered :: forall p a . Choice p => (a -> Boolean) -> Optic' p a a
 ```
 
-It wasn't too bad, we take as input the same on-delete event handler parameter that the task component did and an additional filtering predicate that we apply inside the component. You'll notice that we change the return type of the Monad from `ReactElement` to `Array ReactElement` and this is to handle the scenario where the task is not to be shown.
+It receives a predicate function and then it'll remove any elements from the prism that doesn't match the filter function.
 
 ### Building composed components: The task table
 
@@ -444,8 +430,9 @@ taskTable =
   filter' <- use' _filter
   dispatcher <- eventDispatcher
   tasksView <-
-    focus (_tasks .. traversed)
-      $ filteredTask (taskFilter filter')
+    focus (_tasks .. traversed .. filtered (taskFilter filter'))
+      $ map singleton
+      $ Task.task
       $ dispatcher onDelete
 
   taskBoxView <- taskBox
@@ -487,10 +474,10 @@ Lots of things here to explain:
 
 1. The GUI is just a table containing the smaller GUIs from each of the individual components that we extracted in a monadic style.
 2. The task box component shares the same state as the task table which means it shares the same Monadic type.
-3. The filtered task component we previously defined uses a different state: a task, which needs to be transformed into an array of tasks somehow.
-.. This somehow is the `focus` function provided by Proact which takes as input the transformation lens `_tasks .. traversed` and the component whose state is to be transformed.
-4. We send to the task component the filter that is currently selected and an event handler that responds to the **delete** event.
-5. The event handler takes as input the index of the task to be removed, removes that one task from the list and updates the index of each item of the list to accomodate for the deleted item.
+3. The task component we previously defined uses a different type of state: the state of the task, of course, which needs to be transformed into an array of tasks somehow.
+.. This somehow is the `focus` function provided by Proact which takes as input the transformation lens `_tasks .. traversed` together with the lens `filtered (taskFilter filter')` and the component whose state is to be transformed.
+.. On top of changing the type of the state, we also need to change the type of the Monadic return: the GUI element. This is because when we designed the task component we did it thinking in terms of a single instance but now that we're traversing over a collection we need to define it as well in terms of a data structure that is capable of holding zero, one or more instances of the component. We pick an array but in general this can be any Monoidal data structure.
+.. Finally, in order to build the task component, remember that we needed to send to it the action to be executed whenever a user attempted to delete the task. Just as before, we can use the dispatcher to create event handlers that affect the component state and then we can send them as GUI actions wherever we need to. This event handler will take as input the index of the task to be removed, then remove it from the list and re-index each item of the collection to accomodate for the deleted task.
 
 So now we have a list of tasks inside a table and we're almost done writing this application. Time to move on to the final component.
 

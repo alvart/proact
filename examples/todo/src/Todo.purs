@@ -13,10 +13,10 @@ module Todo
 )
 where
 
-import Control.Monad.Reader (ask, asks)
+import Control.Monad.Reader (ask)
 import Data.Array ((:), deleteAt, filter, length, singleton, snoc)
 import Data.Identity (Identity)
-import Data.Lens (Lens', (%=), (.=), (.~), (^.), lens, traversed)
+import Data.Lens (Lens', (%=), (.=), (.~), (^.), filtered, lens, traversed)
 import Data.Lens.Iso.Newtype (_Newtype)
 import Data.Maybe (fromJust)
 import Data.Monoid (mempty)
@@ -27,7 +27,7 @@ import FilterMenu (Filter(..), filterMenu) as Filter
 import Partial.Unsafe (unsafePartial)
 import Prelude
 import Proact as P
-import ProactPlus (ReactHandler, (..), use')
+import ProactPlus ((..), use')
 import React (ReactElement) as R
 import React.DOM
   ( br'
@@ -70,19 +70,6 @@ _taskDescription =
 -- | Gets or sets the list of tasks.
 _tasks :: Lens' State (Array Task.State)
 _tasks = _Newtype .. lens _.tasks (_ { tasks = _ })
-
--- A task to which a filter has been applied.
-filteredTask
-  :: forall fx
-   . (Task.State -> Boolean)
-  -> ReactHandler fx Int
-  -> P.Component fx Task.State (Array R.ReactElement)
-filteredTask filter' onDelete =
-  do
-  visible <- asks filter'
-  if visible
-    then singleton <$> Task.task onDelete
-    else pure [ ]
 
 -- | The initial state of the component.
 mempty' :: State
@@ -148,8 +135,9 @@ taskTable =
 
   taskBoxView <- taskBox
   tasksView <-
-    P.focus (_tasks .. traversed)
-      $ filteredTask (taskFilter filter')
+    P.focus (_tasks .. traversed .. filtered (taskFilter filter'))
+      $ map singleton
+      $ Task.task
       $ dispatcher onDelete
 
   pure $ view taskBoxView tasksView

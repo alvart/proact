@@ -187,7 +187,7 @@ This whole application revolves around the concept of tasks: we add them, we che
 
 But how does the state of a task look like in our application?
 
-It's actually very simple, every task has a text description that we'd like to display to the user and a boolean flag marking whether the task was completed or not. We will introduce an additional element to the state which is the index of the task within the list of to-do activities. This'll be useful later but for now let's define the data structure of the state:
+It's actually very simple, every task has a text description that we'd like to display to the user and a boolean flag marking whether the task was completed or not. We will introduce an additional element to the state which is the index of the task within the list of to-do activities. This'll be useful later once we start dealing with tasks as items of a collection but for now let's just define the data structure of the state as follows:
 
 ```purescript
 newtype State =
@@ -198,29 +198,9 @@ newtype State =
     }
 
 derive instance newtypeState :: Newtype (State) _
-
-instance semigroupState :: Semigroup (State)
-  where
-  append s1 s2 =
-    if s1 ^. _index < 0
-    then s2
-    else s1
-
-instance monoidState :: Monoid (State)
-  where
-  mempty =
-    State
-      { completed : false
-      , description : ""
-      , index : -1
-      }
 ```
 
-As explained before, we include the fields `completed`, `description` and `index` inside our state but then also make it an instance of the [Monoid](https://pursuit.purescript.org/packages/purescript-monoid/3.3.0/docs/Data.Monoid#t:Monoid) type class. We do so in an interesting manner but first let me explain why does a task need to be a Monoid:
-
-Given that a task will ultimately be composed inside a larger collection along with other tasks, we use lenses to `view` how a fully appended list of tasks would look like. To do so, the lens library demands that we provide a definition of an empty task on top of which it'll start piling the rest of the collection. However, we don't really want a single appended state representing the list of tasks, instead, we want a list of individual states that update independently, so to achieve this, Proact tricks the lensing library into keeping each state separate when appending them together and instead only asks the user for help when deciding how to `append` an actual task state with the `mempty` one. In later versions this could potentially stop being a requirement.
-
-Following the state definition, we also want to include some getters and setters for our state fields so that we don't have to wrap/unwrap the newtype we just created:
+Following this definition, we also want to include some getters and setters for our state fields so that we don't have to wrap/unwrap the newtype we just created:
 
 ```purescript
 _completed :: Lens' State Boolean
@@ -231,6 +211,17 @@ _description = _Newtype .. lens _.description (_ { description = _ })
 
 _index :: Lens' State Int
 _index = _Newtype .. lens _.index (_ { index = _ })
+```
+
+Lastly, it's always a good idea for most components to add a function that returns an initial state, we'll call this function `mempty'`:
+
+```purescript
+mempty' =
+  State
+    { completed : false
+    , description : ""
+    , index : -1
+    }
 ```
 
 And so it's time to implement our Proact component by first designing how the GUI renders with regards to the state we defined above. This looks like the following:
@@ -388,7 +379,7 @@ taskBox =
       then
         do
         let index = length $ state ^. _tasks
-        _tasks %= flip snoc (newTask index event.text mempty)
+        _tasks %= flip snoc (newTask index event.text mempty')
       else if event.keyCode == 27
       then _taskDescription .= ""
       else pure unit
@@ -519,7 +510,7 @@ todo =
 
 At this point, the only thing worth mentioning is the use of the function `focus'` instead of `focus` when absorbing the filtering menu component. You see, `focus` is universal for all lenses (it takes as input a Traversal which is a universal lens) but demands both the type of the state and the monadic return to be Monoids, this is to handle the scenario where there are zero or more instances of the same component. However, for this case we only have one instance of the filtering menu and we can use a less universal lens which happens to be the getter/setter of the filter from the global state. For these scenarios Proact provides the alternative `focus'` that doesn't impose additional constraints on any of the data types of the component but has the downside that it only supports a limited number of lenses: Isos and Lenses.
 
-Before moving on to the last section, it's always a good idea for complex components to define a function that returns an initial state, we'll call it `mempty'`:
+Before moving on to the last section, let's include the `mempty'` function as the initial state:
 
 ```purescript
 mempty' :: State

@@ -31,6 +31,7 @@ import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
 import Control.Monad.Free.Trans
   (bimapFreeT, freeT, hoistFreeT, interpret, resume)
+import Control.Monad.Maybe.Trans (MaybeT(..), runMaybeT)
 import Control.Monad.Reader
   (class MonadAsk, ReaderT, ask, runReaderT, withReaderT)
 import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM)
@@ -43,9 +44,10 @@ import Data.Array.Partial (head, tail)
 import Data.Bifunctor (lmap, rmap) as B
 import Data.Either (Either(..), fromLeft, isRight)
 import Data.Foldable (any, fold)
-import Data.Lens (class Wander, Lens', Traversal', element, set, view)
+import Data.Lens (class Wander, Lens', Traversal', element, preview, set)
 import Data.Lens.Indexed (positions)
 import Data.Lens.Internal.Indexed (Indexed(..))
+import Data.Maybe (Maybe(..), maybe)
 import Data.Monoid (class Monoid, mempty)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Profunctor (class Profunctor, lmap, rmap)
@@ -73,7 +75,7 @@ import Unsafe.Coerce (unsafeCoerce)
 -- | A monadic representation of a component's GUI that provides access to its
 -- | state through the `MonadAsk` interface.
 newtype Component fx state a =
-  Component (Engine (ReaderT (This fx state) (Eff fx)) a state state)
+  Component (Engine (ReaderT (This fx (Maybe state)) (Eff fx)) a state state)
 
 -- | A monadic representation of an event handler that manipulates the
 -- | component's state through the `MonadState` interface.
@@ -157,6 +159,7 @@ instance wanderProComponent
       -- Request input (a collection of states) and use it to gather the last
       -- emitted value of every child component until its co-routine either
       -- completes or blocks awaiting for more input.
+      -- It is assumed that each component will block at least once for input.
       in2 <- lift await
 
       Tuple out2 pendingBlocks <-
@@ -344,7 +347,7 @@ eventDispatcher =
   where
   dispatcher
     :: forall event
-     . This fx state
+     . This fx (Maybe state)
     -> (event -> EventHandler fx state Unit)
     -> (event -> Eff (ReactContext fx) Unit)
   dispatcher this eventHandler event = unsafeCoerceEff $ launchAff_ dispatch
@@ -360,7 +363,7 @@ eventDispatcher =
         Right (Await awaitNext) ->
           do
           state <- liftEff $ read this
-          pure $ Loop $ awaitNext state
+          pure $ maybe (Done $ Left unit) (Loop <<< awaitNext) state
 
     stepProducer producer =
       do
@@ -370,7 +373,7 @@ eventDispatcher =
         Left a -> pure $ Done a
         Right (Emit state emitNext) ->
           do
-          push this state
+          push this $ Just state
           pure $ Loop emitNext
 
 -- | Changes a component's state type through the lens of a traversal.
@@ -378,7 +381,6 @@ eventDispatcher =
 focus
   :: forall fx state1 state2 render
    . Monoid render
-  => Monoid state2
   => Traversal' state1 state2
   -> Component fx state2 render
   -> Component fx state1 render
@@ -387,15 +389,18 @@ focus _traversal (Component engine) =
   where
   focusThis index this = This _push _read
     where
-    _push state2 =
-      do
-      state1 <- liftEff $ read this
-      push this $ set (element index _traversal) state2 state1
+    _push state2' =
+      (void <<< runMaybeT)
+        do
+        state2 <- hoistMaybe state2'
+        state1 <- MaybeT $ liftEff $ read this
+        lift $ push this $ Just $ set (element index _traversal) state2 state1
 
     _read =
-      do
-      state1 <- read this
-      pure $ view (element index _traversal) state1
+      runMaybeT
+        do
+        state1 <- MaybeT $ read this
+        MaybeT $ pure $ preview (element index _traversal) state1
 
   initProducer index state2 producer =
     freeT \_ -> freeT \_ ->
@@ -411,7 +416,21 @@ focus _traversal (Component engine) =
     (Indexed <<< ProComponent)
       do
       Tuple index state2 <- lift await
-      initProducer index state2 $ hoistFreeT (interpret (lmap snd)) engine
+      initProducer index state2 $ hoistFreeT (interpret (lmap snd)) wEngine
+
+  wEngine =
+    freeT \_ -> freeT \_ ->
+      do
+      step <- resume $ resume engine
+      case step
+        of
+      -- Wander requires at least one iteration of get/set to get the initial
+      -- collection of states.
+        Left (Left render) -> resume $ resume $ unwrap $ wComponent render
+        _ -> pure step
+
+  wComponent :: render -> Component fx state2 render
+  wComponent render = void ask *> pure render
 
 -- | Changes a component's state type through a lens.
 -- | For a more general albeit more restrictive version, consider `focus`.
@@ -424,15 +443,18 @@ focus' _lens (Component engine) = Component $ unwrap $ _lens profunctor
   where
   focusThis this = This _push _read
     where
-    _push state2 =
-      do
-      state1 <- liftEff $ read this
-      push this $ set _lens state2 state1
+    _push state2' =
+      (void <<< runMaybeT)
+        do
+        state2 <- hoistMaybe state2'
+        state1 <- MaybeT $ liftEff $ read this
+        lift $ push this $ Just $ set _lens state2 state1
 
     _read =
-      do
-      state1 <- read this
-      pure $ view _lens state1
+      runMaybeT
+        do
+        state1 <- MaybeT $ read this
+        MaybeT $ pure $ preview _lens state1
 
   profunctor = ProComponent $ hoistEngine (withReaderT focusThis) engine
 
@@ -448,7 +470,7 @@ spec (Component engine) iState = React.spec iState render
     where
     stepConsumer consumer =
       do
-      step <- resume consumer `runReaderT` this
+      step <- resume consumer `runReaderT` nullableThis
       case step
         of
         Left a -> pure $ Done a
@@ -469,6 +491,12 @@ spec (Component engine) iState = React.spec iState render
           pure $ Loop emitNext
 
     this = ReactThis _this
+
+    nullableThis = This _push _read
+      where
+      _push state = maybe (pure unit) (push this) state
+
+      _read = map Just $ read this
 
 -- Changes the contravariant type of a producer/consumer stack by giving the
 -- caller a choice on how to deal with the new input type. The last execution
@@ -523,6 +551,10 @@ hoistEngine
   :: forall m n a _in out
    . Functor n => (m ~> n) -> Engine m a _in out -> Engine n a _in out
 hoistEngine hoistFunc engine = hoistFreeT (hoistFreeT hoistFunc) engine
+
+-- Transforms a Maybe into a Maybe Transformer.
+hoistMaybe :: forall m a . Applicative m => Maybe a -> MaybeT m a
+hoistMaybe = MaybeT <<< pure
 
 -- An abstraction of the `React.writeState` function exposing an asynchronous
 -- facade.

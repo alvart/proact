@@ -19,7 +19,6 @@ import Data.Identity (Identity)
 import Data.Lens (Lens', (%=), (.=), (.~), (^.), filtered, lens, traversed)
 import Data.Lens.Iso.Newtype (_Newtype)
 import Data.Maybe (fromJust)
-import Data.Monoid (mempty)
 import Data.Newtype (class Newtype, unwrap)
 import Data.Profunctor (lmap)
 import Data.TraversableWithIndex (traverseWithIndex)
@@ -119,7 +118,7 @@ taskBox =
       then
         do
         let index = length $ state ^. _tasks
-        _tasks %= flip snoc (newTask index event.text mempty)
+        _tasks %= flip snoc (newTask index event.text Task.mempty')
       else if event.keyCode == 27
       then _taskDescription .= ""
       else pure unit

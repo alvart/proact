@@ -8,6 +8,7 @@ module Task
 , _completed
 , _description
 , _index
+, mempty'
 , task
 )
 where
@@ -16,7 +17,6 @@ import Control.Monad.Reader (ask)
 import Data.Array (singleton)
 import Data.Lens (Lens', (.=), (^.), lens)
 import Data.Lens.Iso.Newtype (_Newtype)
-import Data.Monoid (class Monoid)
 import Data.Newtype (class Newtype)
 import Data.Profunctor (lmap)
 import React (ReactElement) as R
@@ -36,24 +36,8 @@ newtype State =
     , index :: Int
     }
 
--- State :: NewType, SemiGroup, Monoid
+-- State :: NewType
 derive instance newtypeState :: Newtype (State) _
-
-instance semigroupState :: Semigroup (State)
-  where
-  append s1 s2 =
-    if s1 ^. _index < 0
-    then s2
-    else s1
-
-instance monoidState :: Monoid (State)
-  where
-  mempty =
-    State
-      { completed : false
-      , description : ""
-      , index : -1
-      }
 
 -- | Gets or sets whether the task completed or not.
 _completed :: Lens' State Boolean
@@ -66,6 +50,15 @@ _description = _Newtype .. lens _.description (_ { description = _ })
 -- | Gets or sets the index within the task list.
 _index :: Lens' State Int
 _index = _Newtype .. lens _.index (_ { index = _ })
+
+-- | The initial state of the component.
+mempty' :: State
+mempty' =
+  State
+    { completed : false
+    , description : ""
+    , index : -1
+    }
 
 -- | The task component.
 task

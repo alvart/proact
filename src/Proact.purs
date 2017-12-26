@@ -14,11 +14,14 @@
 module Proact
 ( Component
 , EventHandler
+, This(ReactThis)
 , EventDispatcher
 , ReactContext
 , eventDispatcher
+, eventDispatcher'
 , focus
 , focus'
+, focusThis
 , spec
 )
 where
@@ -75,20 +78,20 @@ import Unsafe.Coerce (unsafeCoerce)
 -- | A monadic representation of a component's GUI that provides access to its
 -- | state through the `MonadAsk` interface.
 newtype Component fx state a =
-  Component (Engine (ReaderT (This fx (Maybe state)) (Eff fx)) a state state)
+  Component (Engine (ReaderT (This fx { } state) (Eff fx)) a state state)
 
 -- | A monadic representation of an event handler that manipulates the
 -- | component's state through the `MonadState` interface.
 newtype EventHandler fx state a = EventHandler (Engine (Aff fx) a state state)
 
+-- | A composable representation of the underlying React `this` object.
+data This fx props state =
+  This (Maybe state -> Aff fx Unit) (Eff fx (Maybe state))
+  | ReactThis (React.ReactThis props state)
+
 -- A component representation of the Profunctor, Strong, Choice and Wander type
 -- classes.
 newtype ProComponent m a _in out = ProComponent (Engine m a _in out)
-
--- A composable representation of the underlying react `this` object.
-data This fx state =
-  This (state -> Aff fx Unit) (Eff fx state)
-  | ReactThis (React.ReactThis {} state)
 
 -- | A type synonym for an event handler that is accessible from a Component.
 -- | An event object may be later provided to the handler to trigger an event
@@ -334,47 +337,50 @@ instance monadEffComponent :: MonadEff fx (Component fx state)
   where
   liftEff = Component <<< lift <<< lift <<< lift
 
--- | Retrieves an event handler from the current UI context. Once this handler
--- | receives an event component and an event it will trigger the actions
--- | contained in the monadic side-effects (asynchronous).
+-- | Retrieves an event dispatcher from the current Component's context. Once
+-- | the dispatcher receives an event handler and an event it will execute the
+-- | asynchronous actions of the handler.
 eventDispatcher
   :: forall fx state . Component fx state (EventDispatcher fx state)
 eventDispatcher =
   Component
     do
     this <- lift $ lift ask
-    pure $ unsafeCoerce $ dispatcher this
+    pure $ unsafeCoerce $ eventDispatcher' this
+
+-- | Retrieves an event dispatcher from the context of any React component. Once
+-- | the dispatcher receives an event handler and an event it will execute the
+-- | asynchronous actions of the handler.
+eventDispatcher'
+  :: forall fx props state . This fx props state -> EventDispatcher fx state
+eventDispatcher' this eventHandler event =
+  unsafeCoerceEff
+    $ launchAff_
+    $ tailRecM stepProducer
+    $ unwrap
+    $ eventHandler event
   where
-  dispatcher
-    :: forall event
-     . This fx (Maybe state)
-    -> (event -> EventHandler fx state Unit)
-    -> (event -> Eff (ReactContext fx) Unit)
-  dispatcher this eventHandler event = unsafeCoerceEff $ launchAff_ dispatch
-    where
-    dispatch = tailRecM stepProducer $ unwrap $ eventHandler event
+  stepConsumer consumer =
+    do
+    step <- resume consumer
+    case step
+      of
+      Left a -> pure $ Done a
+      Right (Await awaitNext) ->
+        do
+        state <- liftEff $ read this
+        pure $ maybe (Done $ Left unit) (Loop <<< awaitNext) state
 
-    stepConsumer consumer =
-      do
-      step <- resume consumer
-      case step
-        of
-        Left a -> pure $ Done a
-        Right (Await awaitNext) ->
-          do
-          state <- liftEff $ read this
-          pure $ maybe (Done $ Left unit) (Loop <<< awaitNext) state
-
-    stepProducer producer =
-      do
-      step <- tailRecM stepConsumer $ resume producer
-      case step
-        of
-        Left a -> pure $ Done a
-        Right (Emit state emitNext) ->
-          do
-          push this $ Just state
-          pure $ Loop emitNext
+  stepProducer producer =
+    do
+    step <- tailRecM stepConsumer $ resume producer
+    case step
+      of
+      Left a -> pure $ Done a
+      Right (Emit state emitNext) ->
+        do
+        push this $ Just state
+        pure $ Loop emitNext
 
 -- | Changes a component's state type through the lens of a traversal.
 -- | For a less restrictive albeit less general version, consider `focus'`.
@@ -387,7 +393,7 @@ focus
 focus _traversal (Component engine) =
   Component $ unwrap $ positions _traversal profunctor
   where
-  focusThis index this = This _push _read
+  focusThisWithIndex index this = This _push _read
     where
     _push state2' =
       (void <<< runMaybeT)
@@ -409,7 +415,7 @@ focus _traversal (Component engine) =
         Right (Await awaitNext) <-
           resume
             $ resume
-            $ hoistEngine (withReaderT (\this -> focusThis index this)) producer
+            $ hoistEngine (withReaderT (focusThisWithIndex index)) producer
         resume $ awaitNext $ Tuple index state2
 
   profunctor =
@@ -441,22 +447,27 @@ focus'
   -> Component fx state1 render
 focus' _lens (Component engine) = Component $ unwrap $ _lens profunctor
   where
-  focusThis this = This _push _read
-    where
-    _push state2' =
-      (void <<< runMaybeT)
-        do
-        state2 <- hoistMaybe state2'
-        state1 <- MaybeT $ liftEff $ read this
-        lift $ push this $ Just $ set _lens state2 state1
+  profunctor = ProComponent $ hoistEngine (withReaderT (focusThis _lens)) engine
 
-    _read =
-      runMaybeT
-        do
-        state1 <- MaybeT $ read this
-        MaybeT $ pure $ preview _lens state1
+-- | Changes the state type of the underlying React `this` object through a
+-- | lens.
+focusThis
+  :: forall fx props state1 state2
+   . Lens' state1 state2 -> This fx props state1 -> This fx props state2
+focusThis _lens this = This _push _read
+  where
+  _push state2' =
+    (void <<< runMaybeT)
+      do
+      state2 <- hoistMaybe state2'
+      state1 <- MaybeT $ liftEff $ read this
+      lift $ push this $ Just $ set _lens state2 state1
 
-  profunctor = ProComponent $ hoistEngine (withReaderT focusThis) engine
+  _read =
+    runMaybeT
+      do
+      state1 <- MaybeT $ read this
+      MaybeT $ pure $ preview _lens state1
 
 -- | Creates a `ReactSpec` from a Proact Component.
 spec
@@ -466,17 +477,17 @@ spec
   -> React.ReactSpec {} state fx
 spec (Component engine) iState = React.spec iState render
   where
-  render _this = unsafeCoerceEff $ tailRecM stepProducer engine
+  render this = unsafeCoerceEff $ tailRecM stepProducer engine
     where
     stepConsumer consumer =
       do
-      step <- resume consumer `runReaderT` nullableThis
+      step <- resume consumer `runReaderT` ReactThis this
       case step
         of
         Left a -> pure $ Done a
         Right (Await awaitNext) ->
           do
-          state <- read this
+          state <- unsafeCoerceEff $ React.readState this
           pure $ Loop $ awaitNext state
 
     stepProducer producer =
@@ -489,14 +500,6 @@ spec (Component engine) iState = React.spec iState render
           -- Components only emit unchanged states so it's safe to ignore them
           -- in this context.
           pure $ Loop emitNext
-
-    this = ReactThis _this
-
-    nullableThis = This _push _read
-      where
-      _push state = maybe (pure unit) (push this) state
-
-      _read = map Just $ read this
 
 -- Changes the contravariant type of a producer/consumer stack by giving the
 -- caller a choice on how to deal with the new input type. The last execution
@@ -558,11 +561,11 @@ hoistMaybe = MaybeT <<< pure
 
 -- An abstraction of the `React.writeState` function exposing an asynchronous
 -- facade.
-push :: forall fx state . This fx state -> state -> Aff fx Unit
+push :: forall fx props state . This fx props state -> Maybe state -> Aff fx Unit
 push (This _push _) state = _push state
-push (ReactThis this) state = makeAff _push
+push (ReactThis this) state' = maybe (pure unit) (makeAff <<< flip _push) state'
   where
-  _push callback =
+  _push callback state =
     do
     void
       $ unsafeCoerceEff
@@ -574,9 +577,9 @@ push (ReactThis this) state = makeAff _push
 
 -- An abstraction of the `React.readState` function exposing a synchronous
 -- facade.
-read :: forall fx state . This fx state -> Eff fx state
+read :: forall fx props state . This fx props state -> Eff fx (Maybe state)
 read (This _ _read) = _read
-read (ReactThis this) = unsafeCoerceEff $ React.readState this
+read (ReactThis this) = map Just $ unsafeCoerceEff $ React.readState this
 
 -- Changes the covariant type of a profunctor component by merging it with the
 -- most recent global state.

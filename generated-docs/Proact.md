@@ -51,6 +51,15 @@ MonadEff fx (EventHandler fx state)
 MonadState state (EventHandler fx state)
 ```
 
+#### `This`
+
+``` purescript
+data This fx props state
+  = ReactThis (ReactThis props state)
+```
+
+A composable representation of the underlying React `this` object.
+
 #### `EventDispatcher`
 
 ``` purescript
@@ -75,14 +84,24 @@ A type synonym for effects associated to React components.
 eventDispatcher :: forall fx state. Component fx state (EventDispatcher fx state)
 ```
 
-Retrieves an event handler from the current UI context. Once this handler
-receives an event component and an event it will trigger the actions
-contained in the monadic side-effects (asynchronous).
+Retrieves an event dispatcher from the current Component's context. Once
+the dispatcher receives an event handler and an event it will execute the
+asynchronous actions of the handler.
+
+#### `eventDispatcher'`
+
+``` purescript
+eventDispatcher' :: forall fx props state. This fx props state -> EventDispatcher fx state
+```
+
+Retrieves an event dispatcher from the context of any React component. Once
+the dispatcher receives an event handler and an event it will execute the
+asynchronous actions of the handler.
 
 #### `focus`
 
 ``` purescript
-focus :: forall fx state1 state2 render. Monoid render => Monoid state2 => Traversal' state1 state2 -> Component fx state2 render -> Component fx state1 render
+focus :: forall fx state1 state2 render. Monoid render => Traversal' state1 state2 -> Component fx state2 render -> Component fx state1 render
 ```
 
 Changes a component's state type through the lens of a traversal.
@@ -96,6 +115,15 @@ focus' :: forall fx state1 state2 render. Lens' state1 state2 -> Component fx st
 
 Changes a component's state type through a lens.
 For a more general albeit more restrictive version, consider `focus`.
+
+#### `focusThis`
+
+``` purescript
+focusThis :: forall fx props state1 state2. Lens' state1 state2 -> This fx props state1 -> This fx props state2
+```
+
+Changes the state type of the underlying React `this` object through a
+lens.
 
 #### `spec`
 

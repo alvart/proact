@@ -30,6 +30,20 @@ o = (<<<)
 infixr 9 o as ..
 ```
 
+Proact's dispatchers in 2.0 no longer work as event dispatchers so in order to keep this functionality we have to define a new utility function:
+
+```purescript
+type EventDispatcher fx state =
+  forall event
+   . (event -> EventHandler fx state Unit)
+  -> (event -> Eff (EventFx fx) Unit)
+
+withEvent :: forall fx state . Dispatcher fx state -> EventDispatcher fx state
+withEvent dispatcher eventDispatcher = dispatcher <<< eventDispatcher
+```
+
+`EventFx` is a type alias from Proact.
+
 Then we also include an implementation of `use` from the [Data.Lens](https://pursuit.purescript.org/packages/purescript-profunctor-lenses/3.8.0/docs/Data.Lens.Getter#v:use) library that works under the `MonadAsk` context instead of `MonadState`, we'll see why this is useful later.
 
 ```purescript
@@ -40,10 +54,8 @@ use' p = asks (_ ^. p)
 For this application, we'll very soon require to pass around event handlers from one component to another, to save us some typing we'll define a type alias for such handlers:
 
 ```purescript
-type ReactHandler fx event = event -> Eff (ReactContext fx) Unit
+type ReactHandler fx event = event -> Eff (EventFx fx) Unit
 ```
-
-`ReactContext` is a type alias from Proact.
 
 Finally, we throw this last one in:
 
@@ -146,7 +158,7 @@ filterMenu :: forall fx . Component fx State ReactElement
 filterMenu =
   do
   state <- ask
-  dispatcher <- eventDispatcher
+  dispatcher <- withEvent <$> dispatcher
   pure $ view dispatcher state
   where
   view state =
@@ -262,7 +274,7 @@ task :: forall fx . ReactHandler fx Int -> Component fx State ReactElement
 task onDelete =
   do
   state <- ask
-  dispatcher <- eventDispatcher
+  dispatcher <- withEvent <$> dispatcher
   pure $ view dispatcher state
   where
   view dispatcher state =
@@ -346,7 +358,7 @@ taskBox :: forall fx . Component fx State ReactElement
 taskBox =
   do
   state <- ask
-  dispatcher <- eventDispatcher
+  dispatcher <- withEvent <$> dispatcher
   pure $ view dispatcher state
   where
   view dispatcher state =
@@ -419,7 +431,7 @@ taskTable :: forall fx . Component fx State ReactElement
 taskTable =
   do
   filter' <- use' _filter
-  dispatcher <- eventDispatcher
+  dispatcher <- withEvent <$> dispatcher
   tasksView <-
     focus (_tasks .. traversed .. filtered (taskFilter filter'))
       $ map singleton
@@ -470,11 +482,100 @@ Lots of things here to explain:
     * On top of changing the type of the state, we also need to change the type of the Monadic return: the GUI element. This is because when we designed the task component we did it thinking in terms of a single instance but now that we're traversing over a collection we need to define it as well in terms of a data structure that is capable of holding zero, one or more instances of the component. We pick an array but in general this can be any Monoidal data structure.
     * Finally, in order to build the task component, remember that we needed to send to it the action to be executed whenever a user attempted to delete the task. Just as before, we can use the dispatcher to create event handlers that affect the component state and then we can send them as GUI actions wherever we need to. This event handler will take as input the index of the task to be removed, then remove it from the list and re-index each item of the collection to accomodate for the deleted task.
 
-So now we have a list of tasks inside a table and we're almost done writing this application. Time to move on to the final component.
+So now we have a list of tasks inside a table and we're almost done writing this application. Time to move on to the final component... or not! There's actually one more cool thing I'd like to show you before continuing:
+
+## Indexed Traversals: Re-visiting the task list component
+
+A very annoying detail of the previous implementation of the task component was the fact that we had to carry around the concept of its index when adding or removing tasks from the collection. Also, the task component we defined was forced to work on collections with a specific type of index (in this case, integers).
+This is because of a limitation of using simple Traversals, they can only enumerate collections and have no understanding of indexes. Fortunately, Proact also provides support for the more informed versions of Traversals known as Indexed Traversals and they're very simple to use.
+
+First step will be to update the state of a task and remove the notion of its index as we're no longer the ones keeping track of this information:
+
+```purescript
+newtype State =
+  State
+    { completed :: Boolean
+    , description :: String
+    }
+```
+
+Second step will be to re-design our task component as an `IndexedComponent` and to generalize the type of its index so that now tasks can be items of any type of indexed data structure: arrays, lists, maps, sets, etc.
+
+```purescript
+task
+  :: forall fx index
+   . ReactHandler fx index -> IndexedComponent fx index State ReactElement
+```
+
+The last step will be simply to `ask` for the task index within the collection so that we can relay this information later to the onDelete event handler in the same way we did before when we were using simple Traversals.
+
+```purescript
+task
+  :: forall fx index
+   . ReactHandler fx index -> IndexedComponent fx index State ReactElement
+task onDelete =
+  do
+  Tuple index state <- ask
+  dispatcher <- withEvent <$> dispatcher
+
+  pure $ view dispatcher index state
+  where
+  view dispatcher index state =
+    (tr' .. map (td' .. singleton))
+      [
+        input
+          [ _type "checkbox"
+          , className "checkbox"
+          , checked $ state ^. _completed
+          , title "Mark as completed"
+          , onChange $ lmap fromInputEvent $ dispatcher onCompleted
+          ]
+          []
+      , text $ state ^. _description
+      ,
+        a
+          [ className "btn btn-danger pull-right"
+          , title "Remove item"
+          , onClick \_ -> onDelete index
+          ]
+          [ text "✖" ]
+      ]
+
+  fromInputEvent event = { checked : (unsafeCoerce event).target.checked }
+
+  onCompleted event = _completed .= event.checked
+```
+
+See? Barely any change from our previous implementation.
+
+Now that we have our new task component we have to update the way we were using it and the only actual change, as it turns out, is to stop re-indexing the tasks when we remove or add them to the collection:
+
+```purescript
+newTask :: String -> Task.State
+newTask text = Task._description .~ text
+
+onDelete :: forall fx . Int -> EventHandler fx Task.State Unit
+onDelete index = unsafePartial $ _tasks %= fromJust .. deleteAt index
+```
+
+And to complete this section, let's finally use the Indexed Traversal to integrate our task component as part of our task table component:
+
+```purescript
+tasksView <-
+  focus' _tasks
+    $ iFocus (itraversed .. filtered (taskFilter filter'))
+    $ map singleton
+    $ Task.task
+    $ dispatcher onDelete
+```
+
+Barely any difference with respect to our previous implementation:
+1. We changed the lens from `traversed` to `itraversed` which is just the indexed version of a simple traversal.
+2. We still have to focus using `_tasks` after doing an indexed focusing with `iFocus`. This is because indexed traversals cannot compose with other lenses "to the left" and so after traversing the task component, we have only just changed the state type from being a Task to being an Array of tasks. We still, however, need to transform the state type to be compatible with a Task Table component, we do this by focusing again with the `_tasks` lens.
 
 ## Building our fourth and last component: The To-do application
 
-Let's finish the application by putting the filtering menu and the task table together in a to-do component.
+Let's finish the application by putting the filtering menu and the task table together in the to-do component.
 
 The state for this includes all the states defined before and nothing more, thus, once again, we find that we can reuse the same state definition that we had for our last component since it already includes the individual states of the filtering menu and the task table.
 

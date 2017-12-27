@@ -12,23 +12,27 @@
 -- | rapid development.
 
 module Proact
-( Component
+( class Proactive
+, Component
 , EventHandler
+, IndexedComponent
 , This(ReactThis)
-, EventDispatcher
-, ReactContext
-, eventDispatcher
-, eventDispatcher'
+, Dispatcher
+, EventFx
+, dispatcher
+, dispatcher'
 , focus
 , focus'
 , focusThis
+, iFocus
+, readState
 , spec
 )
 where
 
 import Control.Coroutine (Consumer, Producer, Await(..), Emit(..), await, emit)
 import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler)
-import Control.Monad.Aff.Class (class MonadAff, liftAff)
+import Control.Monad.Aff.Class (class MonadAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
@@ -47,7 +51,9 @@ import Data.Array.Partial (head, tail)
 import Data.Bifunctor (lmap, rmap) as B
 import Data.Either (Either(..), fromLeft, isRight)
 import Data.Foldable (any, fold)
-import Data.Lens (class Wander, Lens', Traversal', element, preview, set)
+import Data.Lens
+  (class Wander, IndexedTraversal', Lens', Traversal', element, preview, set)
+import Data.Lens.Index (class Index, ix)
 import Data.Lens.Indexed (positions)
 import Data.Lens.Internal.Indexed (Indexed(..))
 import Data.Maybe (Maybe(..), maybe)
@@ -73,10 +79,25 @@ import React
   , writeStateWithCallback
   )
   as React
-import Unsafe.Coerce (unsafeCoerce)
 
--- | A monadic representation of a component's GUI that provides access to its
--- | state through the `MonadAsk` interface.
+-- | The `Proactive` type class represents any Proact component that provides
+-- | access to its underlying state via the `readState` function and to a
+-- | dispatcher able to execute the actions of an event handler via the
+-- | `dispatcher` function.
+-- |
+-- | An implementation is given for `Component` and for `IndexedComponent`.
+-- |
+-- | Laws:
+-- |
+-- | - readState *> readState = readState
+-- | - dispatcher *> dispatcher = dispatcher
+class (Monad m) <= Proactive fx state m | m -> fx, m -> state
+  where
+  readState :: m state
+  dispatcher :: m (Dispatcher fx state)
+
+-- | A monadic representation of a React component's GUI providing access to the
+-- | underlying state through the `MonadAsk` interface.
 newtype Component fx state a =
   Component (Engine (ReaderT (This fx { } state) (Eff fx)) a state state)
 
@@ -84,25 +105,29 @@ newtype Component fx state a =
 -- | component's state through the `MonadState` interface.
 newtype EventHandler fx state a = EventHandler (Engine (Aff fx) a state state)
 
+-- | A monadic representation of a React component's GUI that is an element of
+-- | an indexed data structure.
+-- | It provides access to the component's underlying state and its index within
+-- | the collection through the `MonadAsk` interface.
+newtype IndexedComponent fx index state a =
+  IndexedComponent
+    (Engine (ReaderT (This fx { } state) (Eff fx)) a (Tuple index state) state)
+
 -- | A composable representation of the underlying React `this` object.
 data This fx props state =
-  This (Maybe state -> Aff fx Unit) (Eff fx (Maybe state))
+  This (state -> Aff fx Unit) (Eff fx (Maybe state))
   | ReactThis (React.ReactThis props state)
 
 -- A component representation of the Profunctor, Strong, Choice and Wander type
 -- classes.
 newtype ProComponent m a _in out = ProComponent (Engine m a _in out)
 
--- | A type synonym for an event handler that is accessible from a Component.
--- | An event object may be later provided to the handler to trigger an event
--- | action.
-type EventDispatcher fx state =
-  forall event
-   . (event -> EventHandler fx state Unit)
-  -> (event -> Eff (ReactContext fx) Unit)
+-- | A type synonym for a dispatcher that is accessible from a Component and
+-- | that executes the actions of an event handler provided to it.
+type Dispatcher fx state = EventHandler fx state Unit -> Eff (EventFx fx) Unit
 
--- | A type synonym for effects associated to React components.
-type ReactContext fx =
+-- | A type synonym for the effects associated to events of React elements.
+type EventFx fx =
   ( props :: React.ReactProps
   , refs :: React.ReactRefs React.ReadOnly
   , state :: React.ReactState React.ReadWrite
@@ -123,7 +148,7 @@ type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
 -- components.
 type Engine m a _in out = Producer out (Consumer _in m) a
 
--- ProComponent :: NewType, Profunctor, Strong, Choice, Wander
+-- ProComponent :: Newtype, Profunctor, Strong, Choice, Wander
 derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
 
 instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
@@ -247,8 +272,7 @@ instance wanderProComponent
           Right (Await awaitNext) -> completeAwait $ awaitNext in1
 
 -- EventHandler
---  :: NewType
---   , Functor
+--  :: Functor
 --   , Apply
 --   , Applicative
 --   , Bind
@@ -257,8 +281,6 @@ instance wanderProComponent
 --   , MonadAff
 --   , MonadEff
 --   , MonadState
-derive instance newtypeEventHandler :: Newtype (EventHandler fx state a) _
-
 instance functorEventHandler :: Functor (EventHandler fx state)
   where
   map f (EventHandler fa) = EventHandler $ map f fa
@@ -273,13 +295,15 @@ instance applicativeEventHandler :: Applicative (EventHandler fx state)
 
 instance bindEventHandler :: Bind (EventHandler fx state)
   where
-  bind (EventHandler ma) f = EventHandler $ map f ma >>= unwrap
+  bind (EventHandler ma) f = EventHandler $ map f ma >>= unwrap'
+    where
+    unwrap' (EventHandler engine) = engine
 
 instance monadEventHandler :: Monad (EventHandler fx state)
 
 instance monadAffEventHandler :: MonadAff fx (EventHandler fx state)
   where
-  liftAff = EventHandler <<< lift <<< lift <<< liftAff
+  liftAff = EventHandler <<< lift <<< lift
 
 instance monadEffEventHandler :: MonadEff fx (EventHandler fx state)
   where
@@ -296,16 +320,14 @@ instance monadStateEventHandler :: MonadState state (EventHandler fx state)
       pure a
 
 -- Component
---  :: NewType
---   , Functor
+--  :: Functor
 --   , Apply
 --   , Applicative
 --   , Bind
 --   , Monad
 --   , MonadAsk
 --   , MonadEff
-derive instance newtypeComponent :: Newtype (Component fx state a) _
-
+--   , Proactive
 instance functorComponent :: Functor (Component fx state)
   where
   map f (Component fa) = Component $ map f fa
@@ -320,7 +342,9 @@ instance applicativeComponent :: Applicative (Component fx state)
 
 instance bindComponent :: Bind (Component fx state)
   where
-  bind (Component ma) f = Component $ map f ma >>= unwrap
+  bind (Component ma) f = Component $ map f ma >>= unwrap'
+    where
+    unwrap' (Component engine) = engine
 
 instance monadComponent :: Monad (Component fx state)
 
@@ -337,28 +361,68 @@ instance monadEffComponent :: MonadEff fx (Component fx state)
   where
   liftEff = Component <<< lift <<< lift <<< lift
 
--- | Retrieves an event dispatcher from the current Component's context. Once
--- | the dispatcher receives an event handler and an event it will execute the
--- | asynchronous actions of the handler.
-eventDispatcher
-  :: forall fx state . Component fx state (EventDispatcher fx state)
-eventDispatcher =
-  Component
-    do
-    this <- lift $ lift ask
-    pure $ unsafeCoerce $ eventDispatcher' this
+instance proactiveComponent :: Proactive fx state (Component fx state)
+  where
+  readState = ask
+  dispatcher = Component $ map dispatcher' $ lift $ lift ask
 
--- | Retrieves an event dispatcher from the context of any React component. Once
--- | the dispatcher receives an event handler and an event it will execute the
--- | asynchronous actions of the handler.
-eventDispatcher'
-  :: forall fx props state . This fx props state -> EventDispatcher fx state
-eventDispatcher' this eventHandler event =
-  unsafeCoerceEff
-    $ launchAff_
-    $ tailRecM stepProducer
-    $ unwrap
-    $ eventHandler event
+-- IndexedComponent
+--  :: Functor
+--   , Apply
+--   , Applicative
+--   , Bind
+--   , Monad
+--   , MonadAsk
+--   , MonadEff
+--   , Proactive
+instance functorIndexedComponent :: Functor (IndexedComponent fx index state)
+  where
+  map f (IndexedComponent fa) = IndexedComponent $ map f fa
+
+instance applyIndexedComponent :: Apply (IndexedComponent fx index state)
+  where
+  apply = ap
+
+instance applicativeIndexedComponent
+  :: Applicative (IndexedComponent fx index state)
+  where
+  pure = IndexedComponent <<< pure
+
+instance bindIndexedComponent :: Bind (IndexedComponent fx index state)
+  where
+  bind (IndexedComponent ma) f = IndexedComponent $ map f ma >>= unwrap'
+    where
+    unwrap' (IndexedComponent engine) = engine
+
+instance monadIndexedComponent :: Monad (IndexedComponent fx index state)
+
+instance monadAskIndexedComponent
+  :: MonadAsk (Tuple index state) (IndexedComponent fx index state)
+  where
+  ask =
+    IndexedComponent
+      do
+      indexedState <- lift await
+      emit $ snd indexedState
+      pure indexedState
+
+instance monadEffIndexedComponent
+  :: MonadEff fx (IndexedComponent fx index state)
+  where
+  liftEff = IndexedComponent <<< lift <<< lift <<< lift
+
+instance proactiveIndexedComponent
+  :: Proactive fx state (IndexedComponent fx index state)
+  where
+  readState = map snd ask
+  dispatcher = IndexedComponent $ map dispatcher' $ lift $ lift ask
+
+-- | Retrieves a dispatcher from the context of any React component. Once the
+-- | dispatcher receives an event handler it will execute its asynchronous code.
+dispatcher'
+  :: forall fx props state . This fx props state -> Dispatcher fx state
+dispatcher' this (EventHandler engine) =
+  unsafeCoerceEff $ launchAff_ $ tailRecM stepProducer engine
   where
   stepConsumer consumer =
     do
@@ -379,7 +443,7 @@ eventDispatcher' this eventHandler event =
       Left a -> pure $ Done a
       Right (Emit state emitNext) ->
         do
-        push this $ Just state
+        push this state
         pure $ Loop emitNext
 
 -- | Changes a component's state type through the lens of a traversal.
@@ -390,17 +454,18 @@ focus
   => Traversal' state1 state2
   -> Component fx state2 render
   -> Component fx state1 render
-focus _traversal (Component engine) =
+focus _traversal component =
   Component $ unwrap $ positions _traversal profunctor
   where
+  Component engine = wanderify component
+
   focusThisWithIndex index this = This _push _read
     where
-    _push state2' =
+    _push state2 =
       (void <<< runMaybeT)
         do
-        state2 <- hoistMaybe state2'
         state1 <- MaybeT $ liftEff $ read this
-        lift $ push this $ Just $ set (element index _traversal) state2 state1
+        lift $ push this $ set (element index _traversal) state2 state1
 
     _read =
       runMaybeT
@@ -422,21 +487,7 @@ focus _traversal (Component engine) =
     (Indexed <<< ProComponent)
       do
       Tuple index state2 <- lift await
-      initProducer index state2 $ hoistFreeT (interpret (lmap snd)) wEngine
-
-  wEngine =
-    freeT \_ -> freeT \_ ->
-      do
-      step <- resume $ resume engine
-      case step
-        of
-      -- Wander requires at least one iteration of get/set to get the initial
-      -- collection of states.
-        Left (Left render) -> resume $ resume $ unwrap $ wComponent render
-        _ -> pure step
-
-  wComponent :: render -> Component fx state2 render
-  wComponent render = void ask *> pure render
+      initProducer index state2 $ hoistFreeT (interpret (lmap snd)) engine
 
 -- | Changes a component's state type through a lens.
 -- | For a more general albeit more restrictive version, consider `focus`.
@@ -456,12 +507,11 @@ focusThis
    . Lens' state1 state2 -> This fx props state1 -> This fx props state2
 focusThis _lens this = This _push _read
   where
-  _push state2' =
+  _push state2 =
     (void <<< runMaybeT)
       do
-      state2 <- hoistMaybe state2'
       state1 <- MaybeT $ liftEff $ read this
-      lift $ push this $ Just $ set _lens state2 state1
+      lift $ push this $ set _lens state2 state1
 
   _read =
     runMaybeT
@@ -469,12 +519,54 @@ focusThis _lens this = This _push _read
       state1 <- MaybeT $ read this
       MaybeT $ pure $ preview _lens state1
 
+-- | Changes a component's state type through the lens of an indexed traversal.
+iFocus
+  :: forall fx index state1 state2 render
+   . Monoid render
+  => Index state1 index state2
+  => IndexedTraversal' index state1 state2
+  -> IndexedComponent fx index state2 render
+  -> Component fx state1 render
+iFocus _iTraversal component = Component $ unwrap $ _iTraversal profunctor
+  where
+  IndexedComponent engine = wanderify component
+
+  focusThisWithIndex index this = This _push _read
+    where
+    _push state2 =
+      (void <<< runMaybeT)
+        do
+        state1 <- MaybeT $ liftEff $ read this
+        lift $ push this $ set (ix index) state2 state1
+
+    _read =
+      runMaybeT
+        do
+        state1 <- MaybeT $ read this
+        MaybeT $ pure $ preview (ix index) state1
+
+  initProducer index state2 producer =
+    freeT \_ -> freeT \_ ->
+      unsafePartial
+        do
+        Right (Await awaitNext) <-
+          resume
+            $ resume
+            $ hoistEngine (withReaderT (focusThisWithIndex index)) producer
+        resume $ awaitNext $ Tuple index state2
+
+  profunctor =
+    (Indexed <<< ProComponent)
+      do
+      Tuple index state2 <- lift await
+      initProducer index state2 engine
+
 -- | Creates a `ReactSpec` from a Proact Component.
 spec
   :: forall fx state
    . Component fx state React.ReactElement
   -> state
-  -> React.ReactSpec {} state fx
+  -> React.ReactSpec { } state fx
 spec (Component engine) iState = React.spec iState render
   where
   render this = unsafeCoerceEff $ tailRecM stepProducer engine
@@ -561,11 +653,11 @@ hoistMaybe = MaybeT <<< pure
 
 -- An abstraction of the `React.writeState` function exposing an asynchronous
 -- facade.
-push :: forall fx props state . This fx props state -> Maybe state -> Aff fx Unit
+push :: forall fx props state . This fx props state -> state -> Aff fx Unit
 push (This _push _) state = _push state
-push (ReactThis this) state' = maybe (pure unit) (makeAff <<< flip _push) state'
+push (ReactThis this) state = makeAff _push
   where
-  _push callback state =
+  _push callback =
     do
     void
       $ unsafeCoerceEff
@@ -613,3 +705,8 @@ strengthen emit' (ProComponent engine) = ProComponent $ stepProducer engine
         Left (Left b) -> pure $ Left $ Left b
         Right (Await awaitNext) ->
           pure $ Right $ Await \_in -> completeAwait (awaitNext _in) _in
+
+-- Prepares any proactive component so that it works when it's applied to the
+-- `wander` function.
+wanderify :: forall fx state m . Proactive fx state m => m ~> m
+wanderify = (void readState *> _)

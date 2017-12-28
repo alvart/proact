@@ -1,12 +1,11 @@
 ## Module Proact
 
-Proact is a web framework inspired by Thermite that provides a
-model-view-dispatcher abstraction on top of `purescript-react`. It exposes
-a clean monadic API to construct and compose components and to define event
-handlers with minimal code overhead. Unlike other dispatch architectures
-that use messages to communicate components, Proact dispatches event
-actions themselves which means there is less boilerplate code and more
-rapid development.
+Proact is a web framework that provides a model-view-dispatcher abstraction
+on top of `purescript-react`. It exposes a clean monadic API to construct
+and compose components and to define event handlers with minimal code
+overhead. Unlike other dispatch architectures that use messages to
+communicate components, Proact dispatches event actions themselves which
+means there is less boilerplate code and more rapid development.
 
 #### `Proactive`
 

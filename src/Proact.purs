@@ -3,13 +3,12 @@
   Proact.purs
 -}
 
--- | Proact is a web framework inspired by Thermite that provides a
--- | model-view-dispatcher abstraction on top of `purescript-react`. It exposes
--- | a clean monadic API to construct and compose components and to define event
--- | handlers with minimal code overhead. Unlike other dispatch architectures
--- | that use messages to communicate components, Proact dispatches event
--- | actions themselves which means there is less boilerplate code and more
--- | rapid development.
+-- | Proact is a web framework that provides a model-view-dispatcher abstraction
+-- | on top of `purescript-react`. It exposes a clean monadic API to construct
+-- | and compose components and to define event handlers with minimal code
+-- | overhead. Unlike other dispatch architectures that use messages to
+-- | communicate components, Proact dispatches event actions themselves which
+-- | means there is less boilerplate code and more rapid development.
 
 module Proact
 ( class Proactive
@@ -30,27 +29,22 @@ module Proact
 )
 where
 
+import Control.Apply (lift2)
 import Control.Coroutine (Consumer, Producer, Await(..), Emit(..), await, emit)
 import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler)
 import Control.Monad.Aff.Class (class MonadAff)
 import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
-import Control.Monad.Free.Trans
-  (bimapFreeT, freeT, hoistFreeT, interpret, resume)
+import Control.Monad.Free.Trans (resume)
 import Control.Monad.Maybe.Trans (MaybeT(..), runMaybeT)
 import Control.Monad.Reader
-  (class MonadAsk, ReaderT, ask, runReaderT, withReaderT)
-import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM)
-import Control.Monad.Rec.Loops (whileM_)
-import Control.Monad.State
-  (class MonadState, evalStateT, execStateT, get, gets, modify, put)
+  (class MonadAsk, ReaderT, ask, mapReaderT, runReaderT, withReaderT)
+import Control.Monad.Rec.Class (Step(..), tailRecM)
+import Control.Monad.State (class MonadState)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Writer (runWriterT, tell)
-import Data.Array.Partial (head, tail)
-import Data.Bifunctor (lmap, rmap) as B
-import Data.Either (Either(..), fromLeft, isRight)
-import Data.Foldable (any, fold)
+import Data.Const (Const(..))
+import Data.Either (Either(..), either)
 import Data.Lens
   (class Wander, IndexedTraversal', Lens', Traversal', element, preview, set)
 import Data.Lens.Index (class Index, ix)
@@ -59,11 +53,10 @@ import Data.Lens.Internal.Indexed (Indexed(..))
 import Data.Maybe (Maybe(..), maybe)
 import Data.Monoid (class Monoid, mempty)
 import Data.Newtype (class Newtype, unwrap)
-import Data.Profunctor (class Profunctor, lmap, rmap)
+import Data.Profunctor (class Profunctor)
 import Data.Profunctor.Choice (class Choice)
 import Data.Profunctor.Strong (class Strong)
 import Data.Tuple (Tuple(..), fst, snd)
-import Partial.Unsafe (unsafePartial)
 import Prelude
 import React
   ( ReactElement
@@ -99,7 +92,7 @@ class (Monad m) <= Proactive fx state m | m -> fx, m -> state
 -- | A monadic representation of a React component's GUI providing access to the
 -- | underlying state through the `MonadAsk` interface.
 newtype Component fx state a =
-  Component (Engine (ReaderT (This fx { } state) (Eff fx)) a state state)
+  Component (ReaderT state (ReaderT (This fx { } state) (Eff fx)) a)
 
 -- | A monadic representation of an event handler that manipulates the
 -- | component's state through the `MonadState` interface.
@@ -111,7 +104,7 @@ newtype EventHandler fx state a = EventHandler (Engine (Aff fx) a state state)
 -- | the collection through the `MonadAsk` interface.
 newtype IndexedComponent fx index state a =
   IndexedComponent
-    (Engine (ReaderT (This fx { } state) (Eff fx)) a (Tuple index state) state)
+    (ReaderT (Tuple index state) (ReaderT (This fx { } state) (Eff fx)) a)
 
 -- | A composable representation of the underlying React `this` object.
 data This fx props state =
@@ -120,7 +113,10 @@ data This fx props state =
 
 -- A component representation of the Profunctor, Strong, Choice and Wander type
 -- classes.
-newtype ProComponent m a _in out = ProComponent (Engine m a _in out)
+newtype ProComponent m a _in out = ProComponent (ReaderT _in m a)
+
+-- Represents a Monoid under application.
+newtype Sequence f a = Sequence (f a)
 
 -- | A type synonym for a dispatcher that is accessible from a Component and
 -- | that executes the actions of an event handler provided to it.
@@ -134,142 +130,58 @@ type EventFx fx =
   | fx
   )
 
--- A type synonym for the consumer co-routine at the first layer of a
--- producer/consumer stack.
-type AwaitBlock m a _in out =
-  Consumer _in m (Either a (Emit out (Engine m a _in out)))
-
--- A type synonym for the consumer co-routine at the first layer of a
--- producer/consumer stack that returns whether a Choice profunctor should yield
--- the mismatched input type or not.
-type AwaitChoiceBlock m a _in out = AwaitBlock m (Either out a) _in out
-
 -- A type synonym for the producer/consumer stack that is the engine behind all
 -- components.
 type Engine m a _in out = Producer out (Consumer _in m) a
 
+-- Sequence :: Newtype, Semigroup, Monoid
+derive instance newtypeSequence :: Newtype (Sequence f a) _
+
+instance semigroupSequence :: (Apply f, Semigroup a) => Semigroup (Sequence f a)
+  where
+  append (Sequence fa1) (Sequence fa2) = Sequence $ lift2 append fa1 fa2
+
+instance monoidSequence :: (Applicative f, Monoid a) => Monoid (Sequence f a)
+  where
+  mempty = Sequence $ pure mempty
+
 -- ProComponent :: Newtype, Profunctor, Strong, Choice, Wander
 derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
 
-instance profunctorProComponent :: (Monad m) => Profunctor (ProComponent m a)
+instance profunctorProComponent :: Profunctor (ProComponent m a)
   where
-  dimap f g (ProComponent engine) =
-    ProComponent $ bimapFreeT (B.lmap g) (interpret (lmap f)) engine
+  dimap f _ (ProComponent reader) = ProComponent $ withReaderT f reader
 
-instance strongProComponent
-  :: (Monad m, MonadRec m) => Strong (ProComponent m a)
+instance strongProComponent :: Strong (ProComponent m a)
   where
-  first component = strengthen (flip Tuple <<< snd) $ lmap fst component
+  first (ProComponent reader) = ProComponent $ withReaderT fst reader
 
-  second component = strengthen (Tuple <<< fst) $ lmap snd component
+  second (ProComponent reader) = ProComponent $ withReaderT snd reader
 
-instance choiceProComponent
-  :: (Monad m, MonadRec m, Monoid a) => Choice (ProComponent m a)
+instance choiceProComponent :: (Monad m, Monoid a) => Choice (ProComponent m a)
   where
-  left (ProComponent engine) =
-    choose selectLeft $ rmap Left $ ProComponent $ map Right engine
-    where
-    selectLeft (Await awaitNext) (Left in1) = awaitNext in1
-    selectLeft _ (Right a) = pure $ Left $ Left (Right a)
-
-  right (ProComponent engine) =
-    choose selectRight $ rmap Right $ ProComponent $ map Right engine
-    where
-    selectRight (Await awaitNext) (Right in1) = awaitNext in1
-    selectRight _ (Left a) = pure $ Left $ Left (Left a)
-
-instance wanderProComponent
-  :: (Monad m, MonadRec m, Monoid a) => Wander (ProComponent m a)
-  where
-  wander traversal (ProComponent engine) =
+  left (ProComponent reader) =
     ProComponent
       do
-      -- Request input (a collection of states) and use it to gather the last
-      -- emitted value of every child component until its co-routine either
-      -- completes or blocks awaiting for more input.
-      -- It is assumed that each component will block at least once for input.
-      in2 <- lift await
+      _in <- ask
+      either (lift <<< runReaderT reader) (const (pure mempty)) _in
 
-      Tuple out2 pendingBlocks <-
-        lift $ lift $ runWriterT $ traversal initAwaitBlock in2
-
-      -- Yield the collection of states assembled in the last step.
-      emit out2
-
-      -- If any component is still blocked awaiting for input, request another
-      -- collection of states and repeat the initialization process that clears
-      -- the await block.
-      let anyBlockPending = get >>= pure <<< any isRight
-      resultList <-
-        unsafePartial
-          $ map (map (fst <<< fromLeft))
-          $ flip execStateT pendingBlocks
-          $ whileM_ anyBlockPending clearAwaitBlockList
-
-      pure $ fold resultList
-    where
-    clearAwaitBlock in1 =
-      unsafePartial
-        do
-        awaitBlock <- gets head
-        modify tail
-        lift
-          case awaitBlock
-            of
-            Left (Tuple a out1) -> tell [ Left $ Tuple a out1 ] *> pure out1
-            Right (Await awaitNext) -> completeAwait $ awaitNext in1
-
-    clearAwaitBlockList =
+  right (ProComponent reader) =
+    ProComponent
       do
-      pendingBlocks <- get
-      in2 <- lift $ lift await
+      _in <- ask
+      either (const (pure mempty)) (lift <<< runReaderT reader) _in
 
-      -- For every component, if it immediately blocks awaiting for input then
-      -- use the data from the original request (the collection of states) to
-      -- resume the co-routine, otherwise return the last yielded value before
-      -- the co-routine completed or blocked.
-      -- It is assumed that each component will perform at least one yield
-      -- operation before completing or blocking.
-      Tuple out2 pendingBlocks' <-
-        lift
-          $ lift
-          $ lift
-          $ runWriterT
-          $ flip evalStateT pendingBlocks
-          $ traversal clearAwaitBlock in2
-
-      lift $ emit out2
-      put pendingBlocks'
-
-    completeAwait awaitBlock =
-      unsafePartial
-        do
-        Left (Right (Emit out1 emitNext)) <- lift $ resume awaitBlock
-        completeEmit out1 emitNext
-
-    completeEmit out1 producer =
-      unsafePartial
-        do
-        step <- lift $ resume $ resume producer
-        case step
-          of
-          Left (Left a) -> tell [ Left $ Tuple a out1 ] *> pure out1
-          Right awaitBlock -> tell [ Right awaitBlock ] *> pure out1
-
-    initAwaitBlock in1 =
-      unsafePartial
-        do
-        -- Make a copy of the initial component for every input state, then if
-        -- it immediately blocks awaiting for more input use the data from the
-        -- original request to resume the co-routine, otherwise return the last
-        -- yielded value before the co-routine completed or blocked.
-        -- It is assumed that each component will perform at least one yield
-        -- operation before completing or blocking.
-        step <- lift $ resume $ resume engine
-        case step
-          of
-          Left (Right (Emit out1 emitNext)) -> completeEmit out1 emitNext
-          Right (Await awaitNext) -> completeAwait $ awaitNext in1
+instance wanderProComponent :: (Monad m, Monoid a) => Wander (ProComponent m a)
+  where
+  wander traversal (ProComponent reader) =
+    ProComponent
+      do
+      in2 <- ask
+      lift
+        $ unwrap
+        $ unwrap
+        $ traversal (Const <<< Sequence <<< runReaderT reader) in2
 
 -- EventHandler
 --  :: Functor
@@ -344,27 +256,22 @@ instance bindComponent :: Bind (Component fx state)
   where
   bind (Component ma) f = Component $ map f ma >>= unwrap'
     where
-    unwrap' (Component engine) = engine
+    unwrap' (Component reader) = reader
 
 instance monadComponent :: Monad (Component fx state)
 
 instance monadAskComponent :: MonadAsk state (Component fx state)
   where
-  ask =
-    Component
-      do
-      state <- lift await
-      emit state
-      pure state
+  ask = Component ask
 
 instance monadEffComponent :: MonadEff fx (Component fx state)
   where
-  liftEff = Component <<< lift <<< lift <<< lift
+  liftEff = Component <<< lift <<< lift
 
 instance proactiveComponent :: Proactive fx state (Component fx state)
   where
   readState = ask
-  dispatcher = Component $ map dispatcher' $ lift $ lift ask
+  dispatcher = Component $ map dispatcher' $ lift ask
 
 -- IndexedComponent
 --  :: Functor
@@ -392,30 +299,25 @@ instance bindIndexedComponent :: Bind (IndexedComponent fx index state)
   where
   bind (IndexedComponent ma) f = IndexedComponent $ map f ma >>= unwrap'
     where
-    unwrap' (IndexedComponent engine) = engine
+    unwrap' (IndexedComponent reader) = reader
 
 instance monadIndexedComponent :: Monad (IndexedComponent fx index state)
 
 instance monadAskIndexedComponent
   :: MonadAsk (Tuple index state) (IndexedComponent fx index state)
   where
-  ask =
-    IndexedComponent
-      do
-      indexedState <- lift await
-      emit $ snd indexedState
-      pure indexedState
+  ask = IndexedComponent ask
 
 instance monadEffIndexedComponent
   :: MonadEff fx (IndexedComponent fx index state)
   where
-  liftEff = IndexedComponent <<< lift <<< lift <<< lift
+  liftEff = IndexedComponent <<< lift <<< lift
 
 instance proactiveIndexedComponent
   :: Proactive fx state (IndexedComponent fx index state)
   where
   readState = map snd ask
-  dispatcher = IndexedComponent $ map dispatcher' $ lift $ lift ask
+  dispatcher = IndexedComponent $ map dispatcher' $ lift ask
 
 -- | Retrieves a dispatcher from the context of any React component. Once the
 -- | dispatcher receives an event handler it will execute its asynchronous code.
@@ -454,11 +356,9 @@ focus
   => Traversal' state1 state2
   -> Component fx state2 render
   -> Component fx state1 render
-focus _traversal component =
+focus _traversal (Component reader) =
   Component $ unwrap $ positions _traversal profunctor
   where
-  Component engine = wanderify component
-
   focusThisWithIndex index this = This _push _read
     where
     _push state2 =
@@ -473,21 +373,11 @@ focus _traversal component =
         state1 <- MaybeT $ read this
         MaybeT $ pure $ preview (element index _traversal) state1
 
-  initProducer index state2 producer =
-    freeT \_ -> freeT \_ ->
-      unsafePartial
-        do
-        Right (Await awaitNext) <-
-          resume
-            $ resume
-            $ hoistEngine (withReaderT (focusThisWithIndex index)) producer
-        resume $ awaitNext $ Tuple index state2
-
   profunctor =
     (Indexed <<< ProComponent)
       do
-      Tuple index state2 <- lift await
-      initProducer index state2 $ hoistFreeT (interpret (lmap snd)) engine
+      Tuple index state2 <- ask
+      lift $ withReaderT (focusThisWithIndex index) $ runReaderT reader state2
 
 -- | Changes a component's state type through a lens.
 -- | For a more general albeit more restrictive version, consider `focus`.
@@ -496,9 +386,12 @@ focus'
    . Lens' state1 state2
   -> Component fx state2 render
   -> Component fx state1 render
-focus' _lens (Component engine) = Component $ unwrap $ _lens profunctor
-  where
-  profunctor = ProComponent $ hoistEngine (withReaderT (focusThis _lens)) engine
+focus' _lens (Component reader) =
+  Component
+    $ unwrap
+    $ _lens
+    $ ProComponent
+    $ mapReaderT (withReaderT (focusThis _lens)) reader
 
 -- | Changes the state type of the underlying React `this` object through a
 -- | lens.
@@ -527,10 +420,9 @@ iFocus
   => IndexedTraversal' index state1 state2
   -> IndexedComponent fx index state2 render
   -> Component fx state1 render
-iFocus _iTraversal component = Component $ unwrap $ _iTraversal profunctor
+iFocus _iTraversal (IndexedComponent reader) =
+  Component $ unwrap $ _iTraversal profunctor
   where
-  IndexedComponent engine = wanderify component
-
   focusThisWithIndex index this = This _push _read
     where
     _push state2 =
@@ -545,21 +437,14 @@ iFocus _iTraversal component = Component $ unwrap $ _iTraversal profunctor
         state1 <- MaybeT $ read this
         MaybeT $ pure $ preview (ix index) state1
 
-  initProducer index state2 producer =
-    freeT \_ -> freeT \_ ->
-      unsafePartial
-        do
-        Right (Await awaitNext) <-
-          resume
-            $ resume
-            $ hoistEngine (withReaderT (focusThisWithIndex index)) producer
-        resume $ awaitNext $ Tuple index state2
-
   profunctor =
     (Indexed <<< ProComponent)
       do
-      Tuple index state2 <- lift await
-      initProducer index state2 engine
+      indexedState <- ask
+      let Tuple index _ = indexedState
+      lift
+        $ withReaderT (focusThisWithIndex index)
+        $ runReaderT reader indexedState
 
 -- | Creates a `ReactSpec` from a Proact Component.
 spec
@@ -567,89 +452,12 @@ spec
    . Component fx state React.ReactElement
   -> state
   -> React.ReactSpec { } state fx
-spec (Component engine) iState = React.spec iState render
+spec (Component reader) iState = React.spec iState render
   where
-  render this = unsafeCoerceEff $ tailRecM stepProducer engine
-    where
-    stepConsumer consumer =
-      do
-      step <- resume consumer `runReaderT` ReactThis this
-      case step
-        of
-        Left a -> pure $ Done a
-        Right (Await awaitNext) ->
-          do
-          state <- unsafeCoerceEff $ React.readState this
-          pure $ Loop $ awaitNext state
-
-    stepProducer producer =
-      do
-      step <- tailRecM stepConsumer $ resume producer
-      case step
-        of
-        Left a -> pure $ Done a
-        Right (Emit _ emitNext) ->
-          -- Components only emit unchanged states so it's safe to ignore them
-          -- in this context.
-          pure $ Loop emitNext
-
--- Changes the contravariant type of a producer/consumer stack by giving the
--- caller a choice on how to deal with the new input type. The last execution
--- step signals the mismatched value that should be yielded before returning
--- a `mempty` result.
--- It is assumed that before emitting, the co-routine will at least once block
--- for input. This is to make sure that when choosing, there'll be an
--- opportunity to fail in case the input mismatched.
-choose
-  :: forall m a in1 in2 out
-   . Monoid a
-  => Monad m
-  => MonadRec m
-  =>
-     (  Await in1 (AwaitChoiceBlock m a in1 out)
-     -> in2
-     -> AwaitChoiceBlock m a in1 out
-     )
-  -> ProComponent m (Either out a) in1 out
-  -> ProComponent m a in2 out
-choose select (ProComponent engine) =
-  ProComponent $ stepOutProducer $ stepInProducer engine
-  where
-  stepConsumer consumer =
-    freeT \_ ->
-      do
-      step <- resume consumer
-      case step
-        of
-        Left emitBlock -> pure $ Left $ B.rmap (map stepInProducer) emitBlock
-        Right awaitBlock ->
-          pure $ Right $ Await $ stepConsumer <<< select awaitBlock
-
-  stepOutProducer producer =
-    freeT \_ ->
-      do
-      step <- resume producer
-      case step
-        of
-        Left tail ->
-          case tail
-            of
-            Left out -> pure $ Right $ Emit out $ pure mempty
-            Right a -> pure $ Left a
-        Right (Emit out emitNext) ->
-          pure $ Right $ Emit out $ stepOutProducer emitNext
-
-  stepInProducer producer = freeT $ const $ stepConsumer $ resume producer
-
--- Changes the underlying monadic context of a component's engine.
-hoistEngine
-  :: forall m n a _in out
-   . Functor n => (m ~> n) -> Engine m a _in out -> Engine n a _in out
-hoistEngine hoistFunc engine = hoistFreeT (hoistFreeT hoistFunc) engine
-
--- Transforms a Maybe into a Maybe Transformer.
-hoistMaybe :: forall m a . Applicative m => Maybe a -> MaybeT m a
-hoistMaybe = MaybeT <<< pure
+  render this =
+    do
+    state <- unsafeCoerceEff $ React.readState this
+    unsafeCoerceEff $ reader `runReaderT` state `runReaderT` ReactThis this
 
 -- An abstraction of the `React.writeState` function exposing an asynchronous
 -- facade.
@@ -672,41 +480,3 @@ push (ReactThis this) state = makeAff _push
 read :: forall fx props state . This fx props state -> Eff fx (Maybe state)
 read (This _ _read) = _read
 read (ReactThis this) = map Just $ unsafeCoerceEff $ React.readState this
-
--- Changes the covariant type of a profunctor component by merging it with the
--- most recent global state.
--- It is assumed that before emitting, the co-routine will at least once block
--- for input. This is so that the unfocused segment of the state can be emitted.
-strengthen
-  :: forall m b _in out1 out2
-   . Monad m
-  => MonadRec m
-  => (_in -> out1 -> out2)
-  -> ProComponent m b _in out1
-  -> ProComponent m b _in out2
-strengthen emit' (ProComponent engine) = ProComponent $ stepProducer engine
-  where
-  completeAwait awaitBlock _in =
-    freeT \_ -> unsafePartial
-      do
-      step <- resume awaitBlock
-      case step
-        of
-        Left (Left b) -> pure $ Left $ Left b
-        Left (Right (Emit out1 emitNext)) ->
-          pure $ Left $ Right $ Emit (emit' _in out1) $ stepProducer emitNext
-
-  stepProducer producer =
-    freeT \_ -> freeT \_ -> unsafePartial
-      do
-      step <- resume $ resume producer
-      case step
-        of
-        Left (Left b) -> pure $ Left $ Left b
-        Right (Await awaitNext) ->
-          pure $ Right $ Await \_in -> completeAwait (awaitNext _in) _in
-
--- Prepares any proactive component so that it works when it's applied to the
--- `wander` function.
-wanderify :: forall fx state m . Proactive fx state m => m ~> m
-wanderify = (void readState *> _)

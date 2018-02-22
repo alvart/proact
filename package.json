@@ -13,18 +13,19 @@
   "description": "Proact is an event driven web framework on top of purescript-react.",
   "devDependencies": {
     "bower": "^1.8.2",
-    "create-html": "^4.1.0",
     "pulp": "^12.0.1",
     "purescript-psa": "^0.5.1",
     "rimraf": "^2.6.2"
   },
   "keywords": [
     "purescript",
+    "dsl",
     "react",
     "lenses",
     "proact",
     "event-driven",
-    "virtual-dom"
+    "virtual-dom",
+    "web framework"
   ],
   "homepage": "https://github.com/alvart/proact.git",
   "license": "MIT",
@@ -32,7 +33,6 @@
   "repository": "https://github.com/alvart/proact.git",
   "scripts": {
     "clean": "rimraf output && rimraf .pulp-cache",
-    "demo:todo": "pulp browserify --src-path examples/todo/src --include src --to html/index.js && create-html -t \"Proact Example\" -c \"https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css\" -s \"index.js\" -b \"<div id=\\\"app\\\"></div>\" -o html/index.html",
     "build": "pulp build"
   },
   "version": "2.0.0"

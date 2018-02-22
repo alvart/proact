@@ -3,480 +3,439 @@
   Proact.purs
 -}
 
--- | Proact is a web framework that provides a model-view-dispatcher abstraction
--- | on top of `purescript-react`. It exposes a clean monadic API to construct
--- | and compose components and to define event handlers with minimal code
--- | overhead. Unlike other dispatch architectures that use messages to
--- | communicate components, Proact dispatches event actions themselves which
--- | means there is less boilerplate code and more rapid development.
+-- | Proact is the core library for a family of web frameworks built from
+-- | composable components that share a singular state which is composed and
+-- | decomposed through Profunctor lenses. This is unlike other functional web
+-- | architectures that compose state through user-provided messages that become
+-- | boilerplate code in the long run.
+-- | Proact also separates the pure elements of a program from its side effects
+-- | by using Free commands which are later paired with Cofree actions to create
+-- | executable functions.  This strategy was chiefly derived from the
+-- | "Free for DSLs, cofree for interpreters" series by Dave Laing.
+-- |
+-- | A web framework using Facebook's React library is provided in this package.
 
 module Proact
-( class Proactive
-, Component
-, EventHandler
-, IndexedComponent
-, This(ReactThis)
-, Dispatcher
-, EventFx
-, dispatcher
-, dispatcher'
-, focus
-, focus'
-, focusThis
-, iFocus
-, readState
-, spec
-)
+  ( ComponentT(..)
+  , EventHandlerT(..)
+  , VaultT(..)
+  , cohoist
+  , cointerpret
+  , dispatch
+  , dispatcher
+  , focus
+  , focus'
+  , focusVault
+  , iFocus
+  , render
+  )
 where
 
 import Control.Apply (lift2)
-import Control.Coroutine (Consumer, Producer, Await(..), Emit(..), await, emit)
-import Control.Monad.Aff (Aff, launchAff_, makeAff, nonCanceler)
-import Control.Monad.Aff.Class (class MonadAff)
-import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Class (class MonadEff, liftEff)
-import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
-import Control.Monad.Free.Trans (resume)
-import Control.Monad.Maybe.Trans (MaybeT(..), runMaybeT)
+import Control.Comonad (class Comonad, (<<=), extract)
+import Control.Comonad.Store (StoreT(..), pos, seek)
+import Control.Comonad.Trans.Class (lower)
 import Control.Monad.Reader
-  (class MonadAsk, ReaderT, ask, mapReaderT, runReaderT, withReaderT)
-import Control.Monad.Rec.Class (Step(..), tailRecM)
-import Control.Monad.State (class MonadState)
-import Control.Monad.Trans.Class (lift)
-import Data.Const (Const(..))
-import Data.Either (Either(..), either)
+  (class MonadAsk, ReaderT(..), ask, runReaderT, withReaderT)
+import Control.Monad.State (class MonadState, StateT, runStateT, state)
+import Control.Monad.Trans.Class (class MonadTrans, lift)
+import Data.Bifunctor (rmap)
 import Data.Lens
-  (class Wander, IndexedTraversal', Lens', Traversal', element, preview, set)
+  ( IndexedTraversal'
+  , Lens'
+  , Traversal'
+  , Forget(..)
+  , Indexed(..)
+  , element
+  , preview
+  , set
+  , view
+  )
 import Data.Lens.Index (class Index, ix)
 import Data.Lens.Indexed (positions)
-import Data.Lens.Internal.Indexed (Indexed(..))
 import Data.Maybe (Maybe(..), maybe)
 import Data.Monoid (class Monoid, mempty)
-import Data.Newtype (class Newtype, unwrap)
-import Data.Profunctor (class Profunctor)
-import Data.Profunctor.Choice (class Choice)
-import Data.Profunctor.Strong (class Strong)
-import Data.Tuple (Tuple(..), fst, snd)
+import Data.Newtype (class Newtype, over, unwrap)
+import Data.Tuple (Tuple(..), snd)
 import Prelude
-import React
-  ( ReactElement
-  , ReactProps
-  , ReactRefs
-  , ReactSpec
-  , ReactState
-  , ReactThis
-  , ReadOnly
-  , ReadWrite
-  , readState
-  , spec
-  , writeStateWithCallback
-  )
-  as React
+import Proact.Comonad.Class.ComonadCofree (peel)
+import Proact.Comonad.Trans.Cofree (CofreeT(..), runCofreeT)
+import Proact.Functor.Pairing (class Pairing, class PairingM, pair, pairM)
+import Proact.Monad.Class.MonadFree (layer, liftFree)
+import Proact.Monad.Trans.Free (class MonadFree, FreeF(..), FreeT, runFreeT)
+import Proact.Trans.Class.Hoist (class HoistT, hoist)
+import Proact.Trans.Class.Interpret (class InterpretT, interpret)
 
--- | The `Proactive` type class represents any Proact component that provides
--- | access to its underlying state via the `readState` function and to a
--- | dispatcher able to execute the actions of an event handler via the
--- | `dispatcher` function.
--- |
--- | An implementation is given for `Component` and for `IndexedComponent`.
--- |
--- | Laws:
--- |
--- | - readState *> readState = readState
--- | - dispatcher *> dispatcher = dispatcher
-class (Monad m) <= Proactive fx state m | m -> fx, m -> state
-  where
-  readState :: m state
-  dispatcher :: m (Dispatcher fx state)
-
--- | A monadic representation of a React component's GUI providing access to the
+-- | A monadic representation of a component that provides access to its
 -- | underlying state through the `MonadAsk` interface.
-newtype Component fx state a =
-  Component (ReaderT state (ReaderT (This fx { } state) (Eff fx)) a)
+newtype ComponentT s t n f w g m a =
+  ComponentT (ReaderT (VaultT t n f w Unit) (FreeT g (ReaderT s m)) a)
 
 -- | A monadic representation of an event handler that manipulates the
 -- | component's state through the `MonadState` interface.
-newtype EventHandler fx state a = EventHandler (Engine (Aff fx) a state state)
+newtype EventHandlerT s f m a = EventHandlerT (FreeT f (StateT s m) a)
 
--- | A monadic representation of a React component's GUI that is an element of
--- | an indexed data structure.
--- | It provides access to the component's underlying state and its index within
--- | the collection through the `MonadAsk` interface.
-newtype IndexedComponent fx index state a =
-  IndexedComponent
-    (ReaderT (Tuple index state) (ReaderT (This fx { } state) (Eff fx)) a)
+-- | Represents a state repository built with a Comonad Transformer.
+newtype VaultT s m f w a = VaultT (CofreeT f (StoreT (Maybe s) w) (m a))
 
--- | A composable representation of the underlying React `this` object.
-data This fx props state =
-  This (state -> Aff fx Unit) (Eff fx (Maybe state))
-  | ReactThis (React.ReactThis props state)
+-- ComponentT
+--   :: Newtype
+--    , Functor
+--    , Apply
+--    , Applicative
+--    , Bind
+--    , Monad
+--    , MonadAsk
+--    , MonadTrans
+--    , MonadFree
+--    , HoistT
+--    , InterpretT
+derive instance newtypeComponentT :: Newtype (ComponentT s t n f w g m a) _
 
--- A component representation of the Profunctor, Strong, Choice and Wander type
--- classes.
-newtype ProComponent m a _in out = ProComponent (ReaderT _in m a)
-
--- Represents a Monoid under application.
-newtype Sequence f a = Sequence (f a)
-
--- | A type synonym for a dispatcher that is accessible from a Component and
--- | that executes the actions of an event handler provided to it.
-type Dispatcher fx state = EventHandler fx state Unit -> Eff (EventFx fx) Unit
-
--- | A type synonym for the effects associated to events of React elements.
-type EventFx fx =
-  ( props :: React.ReactProps
-  , refs :: React.ReactRefs React.ReadOnly
-  , state :: React.ReactState React.ReadWrite
-  | fx
-  )
-
--- A type synonym for the producer/consumer stack that is the engine behind all
--- components.
-type Engine m a _in out = Producer out (Consumer _in m) a
-
--- Sequence :: Newtype, Semigroup, Monoid
-derive instance newtypeSequence :: Newtype (Sequence f a) _
-
-instance semigroupSequence :: (Apply f, Semigroup a) => Semigroup (Sequence f a)
+instance functorComponentT
+  :: (Functor g, Functor m) => Functor (ComponentT s t n f w g m)
   where
-  append (Sequence fa1) (Sequence fa2) = Sequence $ lift2 append fa1 fa2
+  map f (ComponentT fa) = ComponentT $ map f fa
 
-instance monoidSequence :: (Applicative f, Monoid a) => Monoid (Sequence f a)
-  where
-  mempty = Sequence $ pure mempty
-
--- ProComponent :: Newtype, Profunctor, Strong, Choice, Wander
-derive instance newtypeProComponent :: Newtype (ProComponent m a _in out) _
-
-instance profunctorProComponent :: Profunctor (ProComponent m a)
-  where
-  dimap f _ (ProComponent reader) = ProComponent $ withReaderT f reader
-
-instance strongProComponent :: Strong (ProComponent m a)
-  where
-  first (ProComponent reader) = ProComponent $ withReaderT fst reader
-
-  second (ProComponent reader) = ProComponent $ withReaderT snd reader
-
-instance choiceProComponent :: (Monad m, Monoid a) => Choice (ProComponent m a)
-  where
-  left (ProComponent reader) =
-    ProComponent
-      do
-      _in <- ask
-      either (lift <<< runReaderT reader) (const (pure mempty)) _in
-
-  right (ProComponent reader) =
-    ProComponent
-      do
-      _in <- ask
-      either (const (pure mempty)) (lift <<< runReaderT reader) _in
-
-instance wanderProComponent :: (Monad m, Monoid a) => Wander (ProComponent m a)
-  where
-  wander traversal (ProComponent reader) =
-    ProComponent
-      do
-      in2 <- ask
-      lift
-        $ unwrap
-        $ unwrap
-        $ traversal (Const <<< Sequence <<< runReaderT reader) in2
-
--- EventHandler
---  :: Functor
---   , Apply
---   , Applicative
---   , Bind
---   , Monad
---   , MonadAsk
---   , MonadAff
---   , MonadEff
---   , MonadState
-instance functorEventHandler :: Functor (EventHandler fx state)
-  where
-  map f (EventHandler fa) = EventHandler $ map f fa
-
-instance applyEventHandler :: Apply (EventHandler fx state)
+instance applyComponentT
+  :: (Functor g, Monad m) => Apply (ComponentT s t n f w g m)
   where
   apply = ap
 
-instance applicativeEventHandler :: Applicative (EventHandler fx state)
+instance applicativeComponentT
+  :: (Functor g, Monad m) => Applicative (ComponentT s t n f w g m)
   where
-  pure = EventHandler <<< pure
+  pure = ComponentT <<< pure
 
-instance bindEventHandler :: Bind (EventHandler fx state)
+instance bindComponentT
+  :: (Functor g, Monad m) => Bind (ComponentT s t n f w g m)
   where
-  bind (EventHandler ma) f = EventHandler $ map f ma >>= unwrap'
-    where
-    unwrap' (EventHandler engine) = engine
+  bind (ComponentT ma) f = ComponentT $ map f ma >>= unwrap
 
-instance monadEventHandler :: Monad (EventHandler fx state)
+instance monadComponentT
+  :: (Functor g, Monad m) => Monad (ComponentT s t n f w g m)
 
-instance monadAffEventHandler :: MonadAff fx (EventHandler fx state)
+instance monadAskComponentT
+  :: (Functor g, Monad m) => MonadAsk s (ComponentT s t n f w g m)
   where
-  liftAff = EventHandler <<< lift <<< lift
+  ask = ComponentT $ lift $ lift ask
 
-instance monadEffEventHandler :: MonadEff fx (EventHandler fx state)
+instance monadTransComponentT
+  :: (Functor g, Monad m) => MonadTrans (ComponentT s t n f w g)
   where
-  liftEff = EventHandler <<< lift <<< lift <<< liftEff
+  lift = ComponentT <<< lift <<< lift <<< lift
 
-instance monadStateEventHandler :: MonadState state (EventHandler fx state)
+instance monadFreeComponentT
+  :: (Functor g, Monad m) => MonadFree g (ComponentT s t n f w g m)
   where
-  state f =
-    EventHandler
+  layer gma =
+    ComponentT
       do
-      _state <- lift await
-      let Tuple a state' = f _state
-      emit state'
-      pure a
+      vault <- ask
+      lift $ layer $ flip runReaderT vault <<< unwrap <$> gma
 
--- Component
---  :: Functor
---   , Apply
---   , Applicative
---   , Bind
---   , Monad
---   , MonadAsk
---   , MonadEff
---   , Proactive
-instance functorComponent :: Functor (Component fx state)
+  liftFree = ComponentT <<< lift <<< liftFree
+
+instance hoistTComponentT :: (Functor g) => HoistT (ComponentT s t n f w g)
   where
-  map f (Component fa) = Component $ map f fa
+  hoist f (ComponentT component) =
+    ComponentT
+      $ hoist (\freeT -> hoist (\readerT -> hoist f readerT) freeT) component
 
-instance applyComponent :: Apply (Component fx state)
+instance interpretTComponentT :: InterpretT (ComponentT s t n f w)
   where
-  apply = ap
+  interpret f (ComponentT component) =
+    ComponentT $ hoist (\freeT -> interpret f freeT) component
 
-instance applicativeComponent :: Applicative (Component fx state)
+-- EventHandlerT
+--   :: Newtype
+--    , Functor
+--    , Apply
+--    , Applicative
+--    , Bind
+--    , Monad
+--    , MonadAsk
+--    , MonadState
+--    , MonadTrans
+--    , MonadFree
+--    , HoistT
+--    , InterpretT
+derive instance newtypeEventHandlerT :: Newtype (EventHandlerT s f m a) _
+
+instance functorEventHandlerT
+  :: (Functor f, Functor m) => Functor (EventHandlerT s f m)
   where
-  pure = Component <<< pure
+  map f (EventHandlerT fa) = EventHandlerT $ map f fa
 
-instance bindComponent :: Bind (Component fx state)
-  where
-  bind (Component ma) f = Component $ map f ma >>= unwrap'
-    where
-    unwrap' (Component reader) = reader
-
-instance monadComponent :: Monad (Component fx state)
-
-instance monadAskComponent :: MonadAsk state (Component fx state)
-  where
-  ask = Component ask
-
-instance monadEffComponent :: MonadEff fx (Component fx state)
-  where
-  liftEff = Component <<< lift <<< lift
-
-instance proactiveComponent :: Proactive fx state (Component fx state)
-  where
-  readState = ask
-  dispatcher = Component $ map dispatcher' $ lift ask
-
--- IndexedComponent
---  :: Functor
---   , Apply
---   , Applicative
---   , Bind
---   , Monad
---   , MonadAsk
---   , MonadEff
---   , Proactive
-instance functorIndexedComponent :: Functor (IndexedComponent fx index state)
-  where
-  map f (IndexedComponent fa) = IndexedComponent $ map f fa
-
-instance applyIndexedComponent :: Apply (IndexedComponent fx index state)
+instance applyEventHandlerT
+  :: (Functor f, Monad m) => Apply (EventHandlerT s f m)
   where
   apply = ap
 
-instance applicativeIndexedComponent
-  :: Applicative (IndexedComponent fx index state)
+instance applicativeEventHandlerT
+  :: (Functor f, Monad m) => Applicative (EventHandlerT s f m)
   where
-  pure = IndexedComponent <<< pure
+  pure = EventHandlerT <<< pure
 
-instance bindIndexedComponent :: Bind (IndexedComponent fx index state)
+instance bindEventHandlerT
+  :: (Functor f, Monad m) => Bind (EventHandlerT s f m)
   where
-  bind (IndexedComponent ma) f = IndexedComponent $ map f ma >>= unwrap'
-    where
-    unwrap' (IndexedComponent reader) = reader
+  bind (EventHandlerT ma) f = EventHandlerT $ map f ma >>= unwrap
 
-instance monadIndexedComponent :: Monad (IndexedComponent fx index state)
+instance monadEventHandlerT
+  :: (Functor f, Monad m) => Monad (EventHandlerT s f m)
 
-instance monadAskIndexedComponent
-  :: MonadAsk (Tuple index state) (IndexedComponent fx index state)
+instance monadStateEventHandlerT
+  :: (Functor f, Monad m) => MonadState s (EventHandlerT s f m)
   where
-  ask = IndexedComponent ask
+  state = EventHandlerT <<< lift <<< state
 
-instance monadEffIndexedComponent
-  :: MonadEff fx (IndexedComponent fx index state)
+instance monadTransEventHandlerT
+  :: (Functor f, Monad m) => MonadTrans (EventHandlerT s f)
   where
-  liftEff = IndexedComponent <<< lift <<< lift
+  lift = EventHandlerT <<< lift <<< lift
 
-instance proactiveIndexedComponent
-  :: Proactive fx state (IndexedComponent fx index state)
+instance monadFreeEventHandlerT
+  :: (Functor f, Monad m) => MonadFree f (EventHandlerT s f m)
   where
-  readState = map snd ask
-  dispatcher = IndexedComponent $ map dispatcher' $ lift ask
+  layer = EventHandlerT <<< layer <<< map unwrap
 
--- | Retrieves a dispatcher from the context of any React component. Once the
--- | dispatcher receives an event handler it will execute its asynchronous code.
-dispatcher'
-  :: forall fx props state . This fx props state -> Dispatcher fx state
-dispatcher' this (EventHandler engine) =
-  unsafeCoerceEff $ launchAff_ $ tailRecM stepProducer engine
+  liftFree = EventHandlerT <<< liftFree
+
+instance hoistTEventHandlerT :: (Functor f) => HoistT (EventHandlerT s f)
   where
-  stepConsumer consumer =
+  hoist f (EventHandlerT eventHandler) =
+    EventHandlerT $ hoist (\stateT -> hoist f stateT) eventHandler
+
+instance interpretTEventHandlerT :: InterpretT (EventHandlerT s)
+  where
+  interpret f (EventHandlerT eventHandler) =
+    EventHandlerT $ interpret f eventHandler
+
+-- VaultT :: Newtype, HoistT, InterpretT
+derive instance newtypeVaultT :: Newtype (VaultT s m f w a) _
+
+instance hoistTVaultT :: (Functor f) => HoistT (VaultT s m f)
+  where
+  hoist f (VaultT vault) =
+    VaultT $ hoist (\storeT -> hoist f storeT) vault
+
+instance interpretTVaultT :: InterpretT (VaultT s m)
+  where
+  interpret f (VaultT vault) = VaultT $ interpret f vault
+
+-- | Applies a hoist transformation to the state repository of a `ComponentT`.
+cohoist
+  :: forall s t n f w v g m a
+   . Functor f
+  => Functor w
+  => Functor v
+  => (w ~> v) -> ComponentT s t n f v g m a -> ComponentT s t n f w g m a
+cohoist f (ComponentT component) =
+  ComponentT $ withReaderT (\vault -> hoist f vault) component
+
+-- | Applies an interpret transformation to the state repository of a
+-- | `ComponentT`.
+cointerpret
+  :: forall s t n f h w g m a
+   . Functor f
+  => Functor h
+  => Functor w
+  => (f ~> h) -> ComponentT s t n h w g m a -> ComponentT s t n f w g m a
+cointerpret f (ComponentT component) =
+  ComponentT $ withReaderT (\vault -> interpret f vault) component
+
+-- | Pairs a `CofreeT` vault with a `FreeT` event handler to trigger an event
+-- | action.
+dispatch
+  :: forall s n f w g m
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Pairing w m
+  => PairingM f g n
+  => Monad n
+  => VaultT s n f w Unit
+  -> EventHandlerT s g m Unit
+  -> n Unit
+dispatch vault eventHandler = dispatch' (unwrap vault) (unwrap eventHandler)
+  where
+  dispatch' cofreeT freeT =
     do
-    step <- resume consumer
+    let stateT = runFreeT freeT
+    let storeT = runCofreeT cofreeT
+    maybe (pure unit) (dispatch'' storeT stateT) (pos storeT)
+
+  dispatch'' storeT stateT _state =
+    do
+    let cofreeT = CofreeT $ seek (Just state') storeT
+    extract cofreeT
     case step
       of
-      Left a -> pure $ Done a
-      Right (Await awaitNext) ->
-        do
-        state <- liftEff $ read this
-        pure $ maybe (Done $ Left unit) (Loop <<< awaitNext) state
+      Pure _ -> pure unit
+      Free next -> pairM dispatch' (peel cofreeT) (next unit)
+    where
+    Tuple step state' =
+      pair (flip const) (lower storeT) (runStateT stateT _state)
 
-  stepProducer producer =
-    do
-    step <- tailRecM stepConsumer $ resume producer
-    case step
-      of
-      Left a -> pure $ Done a
-      Right (Emit state emitNext) ->
-        do
-        push this state
-        pure $ Loop emitNext
+-- | Provides an action dispatcher in the context of a Proact `ComponentT`.
+dispatcher
+  :: forall s t n f w g m
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Pairing w m
+  => PairingM f g n
+  => Monad n
+  => ComponentT s t n f w g m (EventHandlerT t g m Unit -> n Unit)
+dispatcher = ComponentT $ map dispatch ask
 
--- | Changes a component's state type through the lens of a traversal.
+-- | Changes a `ComponentT`'s state type through the lens of a `Traversal`.
 -- | For a less restrictive albeit less general version, consider `focus'`.
 focus
-  :: forall fx state1 state2 render
-   . Monoid render
-  => Traversal' state1 state2
-  -> Component fx state2 render
-  -> Component fx state1 render
-focus _traversal (Component reader) =
-  Component $ unwrap $ positions _traversal profunctor
+  :: forall s1 s2 n f w g m a
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Monoid a
+  => Traversal' s1 s2
+  -> ComponentT s2 s2 n f w g m a
+  -> ComponentT s1 s1 n f w g m a
+focus _traversal (ComponentT component) =
+  ComponentT $ ReaderT $ focusFree <<< runReaderT focusEnvironment
   where
-  focusThisWithIndex index this = This _push _read
+  focusFree freeT = lift ask >>= hoist lift <<< unwrap focusForget
     where
-    _push state2 =
-      (void <<< runMaybeT)
-        do
-        state1 <- MaybeT $ liftEff $ read this
-        lift $ push this $ set (element index _traversal) state2 state1
+    focusForget =
+      positions _traversal $ Indexed $ Forget $ lowerFreeReader freeT
 
-    _read =
-      runMaybeT
-        do
-        state1 <- MaybeT $ read this
-        MaybeT $ pure $ preview (element index _traversal) state1
+  iFocusVault i = over VaultT focusCofree
+    where
+    focusCofree cofreeT =
+      CofreeT $ StoreT $ Tuple (_peek <<< extract <<= w1) _pos
+      where
+      StoreT (Tuple w1 ms1) = runCofreeT cofreeT
 
-  profunctor =
-    (Indexed <<< ProComponent)
-      do
-      Tuple index state2 <- ask
-      lift $ withReaderT (focusThisWithIndex index) $ runReaderT reader state2
+      _peek f1 ms2 =
+        rmap focusCofree $ f1 $ lift2 (set (element i _traversal)) ms2 ms1
 
--- | Changes a component's state type through a lens.
+      _pos = ms1 >>= preview (element i _traversal)
+
+  focusEnvironment =
+    do
+    Tuple i _ <- lift $ lift ask
+    withReaderT (iFocusVault i) $ hoist (hoist (withReaderT snd)) component
+
+-- | Changes a `ComponentT`'s state type through a `Lens`.
 -- | For a more general albeit more restrictive version, consider `focus`.
 focus'
-  :: forall fx state1 state2 render
-   . Lens' state1 state2
-  -> Component fx state2 render
-  -> Component fx state1 render
-focus' _lens (Component reader) =
-  Component
-    $ unwrap
-    $ _lens
-    $ ProComponent
-    $ mapReaderT (withReaderT (focusThis _lens)) reader
-
--- | Changes the state type of the underlying React `this` object through a
--- | lens.
-focusThis
-  :: forall fx props state1 state2
-   . Lens' state1 state2 -> This fx props state1 -> This fx props state2
-focusThis _lens this = This _push _read
+  :: forall s1 s2 n f w g m a
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Lens' s1 s2 -> ComponentT s2 s2 n f w g m a -> ComponentT s1 s1 n f w g m a
+focus' _lens (ComponentT component) =
+  ComponentT $ ReaderT $ focusFree <<< runReaderT focusEnvironment
   where
-  _push state2 =
-    (void <<< runMaybeT)
-      do
-      state1 <- MaybeT $ liftEff $ read this
-      lift $ push this $ set _lens state2 state1
+  focusFree freeT = lift ask >>= hoist lift <<< unwrap focusForget
+    where
+    focusForget = _lens $ Forget $ lowerFreeReader freeT
 
-  _read =
-    runMaybeT
-      do
-      state1 <- MaybeT $ read this
-      MaybeT $ pure $ preview _lens state1
+  focusEnvironment = withReaderT (focusVault _lens) component
+
+-- | Changes the type of the state repository through a `Lens`.
+focusVault
+  :: forall s1 s2 f w m a
+   . Functor f
+  => Comonad w
+  => Lens' s1 s2 -> VaultT s1 m f w a -> VaultT s2 m f w a
+focusVault _lens = over VaultT focusCofree
+  where
+  focusCofree cofreeT =
+    CofreeT $ StoreT $ Tuple (_peek <<< extract <<= w1) _pos
+    where
+    StoreT (Tuple w1 ms1) = runCofreeT cofreeT
+
+    _peek f1 ms2 = rmap focusCofree $ f1 $ lift2 (set _lens) ms2 ms1
+
+    _pos = map (view _lens) ms1
 
 -- | Changes a component's state type through the lens of an indexed traversal.
 iFocus
-  :: forall fx index state1 state2 render
-   . Monoid render
-  => Index state1 index state2
-  => IndexedTraversal' index state1 state2
-  -> IndexedComponent fx index state2 render
-  -> Component fx state1 render
-iFocus _iTraversal (IndexedComponent reader) =
-  Component $ unwrap $ _iTraversal profunctor
+  :: forall s1 s2 i n f w g m a
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Monoid a
+  => Index s1 i s2
+  => IndexedTraversal' i s1 s2
+  -> ComponentT (Tuple i s2) s2 n f w g m a
+  -> ComponentT s1 s1 n f w g m a
+iFocus _iTraversal (ComponentT component) =
+  ComponentT $ ReaderT $ focusFree <<< runReaderT focusEnvironment
   where
-  focusThisWithIndex index this = This _push _read
+  focusFree freeT = lift ask >>= hoist lift <<< unwrap focusForget
     where
-    _push state2 =
-      (void <<< runMaybeT)
-        do
-        state1 <- MaybeT $ liftEff $ read this
-        lift $ push this $ set (ix index) state2 state1
+    focusForget = _iTraversal $ Indexed $ Forget $ lowerFreeReader freeT
 
-    _read =
-      runMaybeT
-        do
-        state1 <- MaybeT $ read this
-        MaybeT $ pure $ preview (ix index) state1
+  iFocusVault i = over VaultT focusCofree
+    where
+    focusCofree cofreeT =
+      CofreeT $ StoreT $ Tuple (_peek <<< extract <<= w1) _pos
+      where
+      StoreT (Tuple w1 ms1) = runCofreeT cofreeT
 
-  profunctor =
-    (Indexed <<< ProComponent)
-      do
-      indexedState <- ask
-      let Tuple index _ = indexedState
-      lift
-        $ withReaderT (focusThisWithIndex index)
-        $ runReaderT reader indexedState
+      _peek f1 ms2 = rmap focusCofree $ f1 $ lift2 (set (ix i)) ms2 ms1
 
--- | Creates a `ReactSpec` from a Proact Component.
-spec
-  :: forall fx state
-   . Component fx state React.ReactElement
-  -> state
-  -> React.ReactSpec { } state fx
-spec (Component reader) iState = React.spec iState render
-  where
-  render this =
+      _pos = ms1 >>= preview (ix i)
+
+  focusEnvironment =
     do
-    state <- unsafeCoerceEff $ React.readState this
-    unsafeCoerceEff $ reader `runReaderT` state `runReaderT` ReactThis this
+    Tuple i _ <- lift $ lift ask
+    withReaderT (iFocusVault i) component
 
--- An abstraction of the `React.writeState` function exposing an asynchronous
--- facade.
-push :: forall fx props state . This fx props state -> state -> Aff fx Unit
-push (This _push _) state = _push state
-push (ReactThis this) state = makeAff _push
+-- | Renders a `ComponentT` in a monadic context.
+render
+  :: forall s n f w g m a
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Monad n
+  => PairingM f g n
+  => Pairing w m
+  => Monoid a
+  => VaultT s n f w Unit
+  -> VaultT s n f w Unit
+  -> ComponentT s s n f w g m a
+  -> n a
+render renderVault dispatchVault component =
+  render' (unwrap renderVault) $ runReaderT (unwrap component) dispatchVault
   where
-  _push callback =
+  render' cofreeT freeT =
     do
-    void
-      $ unsafeCoerceEff
-      $ React.writeStateWithCallback this state
-      $ unsafeCoerceEff
-      $ callback
-      $ Right unit
-    pure nonCanceler
+    let stateT = runFreeT freeT
+    let storeT = runCofreeT cofreeT
+    maybe (pure mempty) (render'' storeT stateT) (pos storeT)
 
--- An abstraction of the `React.readState` function exposing a synchronous
--- facade.
-read :: forall fx props state . This fx props state -> Eff fx (Maybe state)
-read (This _ _read) = _read
-read (ReactThis this) = map Just $ unsafeCoerceEff $ React.readState this
+  render'' storeT stateT _state =
+    do
+    let cofreeT = CofreeT storeT
+    extract cofreeT
+    case step
+      of
+      Pure a -> pure a
+      Free next -> pairM render' (peel cofreeT) (next unit)
+    where
+    step = pair (flip const) (lower storeT) (runReaderT stateT _state)
+
+-- Lowers a `ReaderT` monad transformer.
+lowerFreeReader
+  :: forall s f m a
+   . Functor f => Functor m => FreeT f (ReaderT s m) a -> s -> FreeT f m a
+lowerFreeReader freeT s2 = hoist (\reader -> runReaderT reader s2) freeT

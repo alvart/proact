@@ -1,63 +1,47 @@
 ## Module Proact
 
-Proact is a web framework that provides a model-view-dispatcher abstraction
-on top of `purescript-react`. It exposes a clean monadic API to construct
-and compose components and to define event handlers with minimal code
-overhead. Unlike other dispatch architectures that use messages to
-communicate components, Proact dispatches event actions themselves which
-means there is less boilerplate code and more rapid development.
+Proact is the core library for a family of web frameworks built from
+composable components that share a singular state which is composed and
+decomposed through Profunctor lenses. This is unlike other functional web
+architectures that compose state through user-provided messages that become
+boilerplate code in the long run.
+Proact also separates the pure elements of a program from its side effects
+by using Free commands which are later paired with Cofree actions to create
+executable functions.  This strategy was chiefly derived from the
+"Free for DSLs, cofree for interpreters" series by Dave Laing.
 
-#### `Proactive`
+A web framework using Facebook's React library is provided in this package.
 
-``` purescript
-class (Monad m) <= Proactive fx state m | m -> fx, m -> state where
-  readState :: m state
-  dispatcher :: m (Dispatcher fx state)
-```
-
-The `Proactive` type class represents any Proact component that provides
-access to its underlying state via the `readState` function and to a
-dispatcher able to execute the actions of an event handler via the
-`dispatcher` function.
-
-An implementation is given for `Component` and for `IndexedComponent`.
-
-Laws:
-
-- readState *> readState = readState
-- dispatcher *> dispatcher = dispatcher
-
-##### Instances
-``` purescript
-Proactive fx state (Component fx state)
-Proactive fx state (IndexedComponent fx index state)
-```
-
-#### `Component`
+#### `ComponentT`
 
 ``` purescript
-newtype Component fx state a
+newtype ComponentT s t n f w g m a
+  = ComponentT (ReaderT (VaultT t n f w Unit) (FreeT g (ReaderT s m)) a)
 ```
 
-A monadic representation of a React component's GUI providing access to the
+A monadic representation of a component that provides access to its
 underlying state through the `MonadAsk` interface.
 
 ##### Instances
 ``` purescript
-Functor (Component fx state)
-Apply (Component fx state)
-Applicative (Component fx state)
-Bind (Component fx state)
-Monad (Component fx state)
-MonadAsk state (Component fx state)
-MonadEff fx (Component fx state)
-Proactive fx state (Component fx state)
+Newtype (ComponentT s t n f w g m a) _
+(Functor g, Functor m) => Functor (ComponentT s t n f w g m)
+(Functor g, Monad m) => Apply (ComponentT s t n f w g m)
+(Functor g, Monad m) => Applicative (ComponentT s t n f w g m)
+(Functor g, Monad m) => Bind (ComponentT s t n f w g m)
+(Functor g, Monad m) => Monad (ComponentT s t n f w g m)
+(Functor g, Monad m) => MonadAsk s (ComponentT s t n f w g m)
+(Functor g, Monad m) => MonadTrans (ComponentT s t n f w g)
+(Functor g, Monad m) => MonadFree g (ComponentT s t n f w g m)
+(Functor g) => HoistT (ComponentT s t n f w g)
+InterpretT (ComponentT s t n f w)
 ```
 
-#### `EventHandler`
+#### `EventHandlerT`
 
 ``` purescript
-newtype EventHandler fx state a
+newtype EventHandlerT s f m a
+  = EventHandlerT (FreeT f (StateT s m) a)
 ```
 
 A monadic representation of an event handler that manipulates the
@@ -65,115 +49,109 @@ component's state through the `MonadState` interface.
 
 ##### Instances
 ``` purescript
-Functor (EventHandler fx state)
-Apply (EventHandler fx state)
-Applicative (EventHandler fx state)
-Bind (EventHandler fx state)
-Monad (EventHandler fx state)
-MonadAff fx (EventHandler fx state)
-MonadEff fx (EventHandler fx state)
-MonadState state (EventHandler fx state)
+Newtype (EventHandlerT s f m a) _
+(Functor f, Functor m) => Functor (EventHandlerT s f m)
+(Functor f, Monad m) => Apply (EventHandlerT s f m)
+(Functor f, Monad m) => Applicative (EventHandlerT s f m)
+(Functor f, Monad m) => Bind (EventHandlerT s f m)
+(Functor f, Monad m) => Monad (EventHandlerT s f m)
+(Functor f, Monad m) => MonadState s (EventHandlerT s f m)
+(Functor f, Monad m) => MonadTrans (EventHandlerT s f)
+(Functor f, Monad m) => MonadFree f (EventHandlerT s f m)
+(Functor f) => HoistT (EventHandlerT s f)
+InterpretT (EventHandlerT s)
 ```
 
-#### `IndexedComponent`
+#### `VaultT`
 
 ``` purescript
-newtype IndexedComponent fx index state a
+newtype VaultT s m f w a
+  = VaultT (CofreeT f (StoreT (Maybe s) w) (m a))
 ```
 
-A monadic representation of a React component's GUI that is an element of
-an indexed data structure.
-It provides access to the component's underlying state and its index within
-the collection through the `MonadAsk` interface.
+Represents a state repository built with a Comonad Transformer.
 
 ##### Instances
 ``` purescript
-Functor (IndexedComponent fx index state)
-Apply (IndexedComponent fx index state)
-Applicative (IndexedComponent fx index state)
-Bind (IndexedComponent fx index state)
-Monad (IndexedComponent fx index state)
-MonadAsk (Tuple index state) (IndexedComponent fx index state)
-MonadEff fx (IndexedComponent fx index state)
-Proactive fx state (IndexedComponent fx index state)
+Newtype (VaultT s m f w a) _
+(Functor f) => HoistT (VaultT s m f)
+InterpretT (VaultT s m)
 ```
 
-#### `This`
+#### `cohoist`
 
 ``` purescript
-data This fx props state
-  = ReactThis (ReactThis props state)
+cohoist :: forall s t n f w v g m a. Functor f => Functor w => Functor v => (w ~> v) -> ComponentT s t n f v g m a -> ComponentT s t n f w g m a
 ```
 
-A composable representation of the underlying React `this` object.
+Applies a hoist transformation to the state repository of a `ComponentT`.
 
-#### `Dispatcher`
+#### `cointerpret`
 
 ``` purescript
-type Dispatcher fx state = EventHandler fx state Unit -> Eff (EventFx fx) Unit
+cointerpret :: forall s t n f h w g m a. Functor f => Functor h => Functor w => (f ~> h) -> ComponentT s t n h w g m a -> ComponentT s t n f w g m a
 ```
 
-A type synonym for a dispatcher that is accessible from a Component and
-that executes the actions of an event handler provided to it.
+Applies an interpret transformation to the state repository of a
+`ComponentT`.
 
-#### `EventFx`
+#### `dispatch`
 
 ``` purescript
-type EventFx fx = (props :: ReactProps, refs :: ReactRefs ReadOnly, state :: ReactState ReadWrite | fx)
+dispatch :: forall s n f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g n => Monad n => VaultT s n f w Unit -> EventHandlerT s g m Unit -> n Unit
 ```
 
-A type synonym for the effects associated to events of React elements.
+Pairs a `CofreeT` vault with a `FreeT` event handler to trigger an event
+action.
 
-#### `dispatcher'`
+#### `dispatcher`
 
 ``` purescript
-dispatcher' :: forall fx props state. This fx props state -> Dispatcher fx state
+dispatcher :: forall s t n f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g n => Monad n => ComponentT s t n f w g m (EventHandlerT t g m Unit -> n Unit)
 ```
 
-Retrieves a dispatcher from the context of any React component. Once the
-dispatcher receives an event handler it will execute its asynchronous code.
+Provides an action dispatcher in the context of a Proact `ComponentT`.
 
 #### `focus`
 
 ``` purescript
-focus :: forall fx state1 state2 render. Monoid render => Traversal' state1 state2 -> Component fx state2 render -> Component fx state1 render
+focus :: forall s1 s2 n f w g m a. Functor f => Functor g => Comonad w => Monad m => Monoid a => Traversal' s1 s2 -> ComponentT s2 s2 n f w g m a -> ComponentT s1 s1 n f w g m a
 ```
 
-Changes a component's state type through the lens of a traversal.
+Changes a `ComponentT`'s state type through the lens of a `Traversal`.
 For a less restrictive albeit less general version, consider `focus'`.
 
 #### `focus'`
 
 ``` purescript
-focus' :: forall fx state1 state2 render. Lens' state1 state2 -> Component fx state2 render -> Component fx state1 render
+focus' :: forall s1 s2 n f w g m a. Functor f => Functor g => Comonad w => Monad m => Lens' s1 s2 -> ComponentT s2 s2 n f w g m a -> ComponentT s1 s1 n f w g m a
 ```
 
-Changes a component's state type through a lens.
+Changes a `ComponentT`'s state type through a `Lens`.
 For a more general albeit more restrictive version, consider `focus`.
 
-#### `focusThis`
+#### `focusVault`
 
 ``` purescript
-focusThis :: forall fx props state1 state2. Lens' state1 state2 -> This fx props state1 -> This fx props state2
+focusVault :: forall s1 s2 f w m a. Functor f => Comonad w => Lens' s1 s2 -> VaultT s1 m f w a -> VaultT s2 m f w a
 ```
 
-Changes the state type of the underlying React `this` object through a
-lens.
+Changes the type of the state repository through a `Lens`.
 
 #### `iFocus`
 
 ``` purescript
-iFocus :: forall fx index state1 state2 render. Monoid render => Index state1 index state2 => IndexedTraversal' index state1 state2 -> IndexedComponent fx index state2 render -> Component fx state1 render
+iFocus :: forall s1 s2 i n f w g m a. Functor f => Functor g => Comonad w => Monad m => Monoid a => Index s1 i s2 => IndexedTraversal' i s1 s2 -> ComponentT (Tuple i s2) s2 n f w g m a -> ComponentT s1 s1 n f w g m a
 ```
 
 Changes a component's state type through the lens of an indexed traversal.
 
-#### `spec`
+#### `render`
 
 ``` purescript
-spec :: forall fx state. Component fx state ReactElement -> state -> ReactSpec {  } state fx
+render :: forall s n f w g m a. Functor f => Functor g => Comonad w => Monad m => Monad n => PairingM f g n => Pairing w m => Monoid a => VaultT s n f w Unit -> VaultT s n f w Unit -> ComponentT s s n f w g m a -> n a
 ```
 
-Creates a `ReactSpec` from a Proact Component.
+Renders a `ComponentT` in a monadic context.
 
 

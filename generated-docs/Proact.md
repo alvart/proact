@@ -31,7 +31,7 @@ Newtype (ComponentT s t n f w g m a) _
 (Functor g, Monad m) => Bind (ComponentT s t n f w g m)
 (Functor g, Monad m) => Monad (ComponentT s t n f w g m)
 (Functor g, Monad m) => MonadAsk s (ComponentT s t n f w g m)
-(Functor g, Monad m) => MonadTrans (ComponentT s t n f w g)
+(Functor g) => MonadTrans (ComponentT s t n f w g)
 (Functor g, Monad m) => MonadFree g (ComponentT s t n f w g m)
 (Functor g) => HoistT (ComponentT s t n f w g)
 InterpretT (ComponentT s t n f w)

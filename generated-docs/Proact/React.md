@@ -36,7 +36,7 @@ A type synonym for effects coming from React elements.
 #### `dispatch`
 
 ``` purescript
-dispatch :: forall s1 s2 f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g IOSync => (ReactStoreT s1 w Unit -> f (ReactStoreT s1 w Unit)) -> ReactStoreT s1 w Unit -> ReactThis {  } s1 -> Lens' s1 s2 -> Dispatcher s2 g m Unit
+dispatch :: forall s1 s2 f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g IOSync => Lens' s1 s2 -> (ReactStoreT s1 w Unit -> f (ReactStoreT s1 w Unit)) -> ReactStoreT s1 w Unit -> ReactThis {  } s1 -> Dispatcher s2 g m Unit
 ```
 
 Dispatches React actions detached from the context of a Component. The

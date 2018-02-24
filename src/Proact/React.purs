@@ -89,12 +89,12 @@ dispatch
   => Monad m
   => Pairing w m
   => PairingM f g IOSync
-  => (ReactStoreT s1 w Unit -> f (ReactStoreT s1 w Unit))
+  => Lens' s1 s2
+  -> (ReactStoreT s1 w Unit -> f (ReactStoreT s1 w Unit))
   -> ReactStoreT s1 w Unit
   -> React.ReactThis { } s1
-  -> Lens' s1 s2
   -> Dispatcher s2 g m Unit
-dispatch iterator start this _lens eventHandler =
+dispatch _lens iterator start this eventHandler =
   do
   let dispatchVault = P.focusVault _lens $ vault iterator start writeState
   unsafeCoerceEff $ runIOSync $ P.dispatch dispatchVault eventHandler

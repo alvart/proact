@@ -121,7 +121,7 @@ instance monadAskComponentT
   ask = ComponentT $ lift $ lift ask
 
 instance monadTransComponentT
-  :: (Functor g, Monad m) => MonadTrans (ComponentT s t n f w g)
+  :: (Functor g) => MonadTrans (ComponentT s t n f w g)
   where
   lift = ComponentT <<< lift <<< lift <<< lift
 

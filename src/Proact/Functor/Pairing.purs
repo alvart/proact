@@ -19,6 +19,9 @@ import Control.Comonad.Store (StoreT(..))
 import Control.Monad.Reader (ReaderT(..))
 import Control.Monad.State (StateT(..))
 import Control.Monad.Writer (WriterT(..))
+import Data.Either (Either(..))
+import Data.Functor.Product (Product(..))
+import Data.Functor.Coproduct (Coproduct(..))
 import Data.Identity (Identity(..))
 import Data.Tuple (Tuple(..))
 import Prelude
@@ -71,6 +74,15 @@ instance cofreeTFreeTPairing
     where
     pairFree (CofreeF a _) (Pure b) = f a b
     pairFree (CofreeF _ fa) (Free gb) = pair (pair f) (fa unit) (gb unit)
+
+-- (Tuple, (->)) :: Pairing
+instance tupleFuncPairing :: Pairing (Tuple a) ((->) a) where
+  pair f (Tuple a b) ga = f b (ga a)
+
+-- (Product, Coproduct) :: Pairing
+instance productCoproductPairing :: (Functor f, Functor g, Functor f', Functor g', Pairing f f', Pairing g g') => Pairing (Product f g) (Coproduct f' g') where
+  pair f (Product (Tuple a _)) (Coproduct (Left  x)) = pair f a x
+  pair f (Product (Tuple _ b)) (Coproduct (Right x)) = pair f b x
 
 -- | All pairings are symmetric.
 sym :: forall f g a b c . Pairing f g => (a -> b -> c) -> g a -> f b -> c

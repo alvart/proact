@@ -1,11 +1,9 @@
 {
   "author": "Jon Alvart <code.alvart@gmail.com>",
   "dependencies": {
-    "purescript-dom": "^4.0.0",
-    "purescript-io": "^5.0.0",
-    "purescript-profunctor-lenses": "^3.0.0",
-    "purescript-react": "^5.0.0",
-    "purescript-react-dom": "^5.0.0"
+    "purescript-profunctor-lenses": "^4.0.0",
+    "purescript-react": "^6.0.0",
+    "purescript-react-dom": "^6.0.0"
   },
   "ignore": [
     "**/.*",

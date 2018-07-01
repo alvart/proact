@@ -38,7 +38,7 @@ Newtype (FreeT f m a) _
 (Functor f) => MonadTrans (FreeT f)
 (Functor f, Monad m) => MonadFree f (FreeT f m)
 (Functor f) => HoistT (FreeT f)
-InterpretT (FreeT)
+InterpretT FreeT
 ```
 
 #### `iterT`

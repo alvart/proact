@@ -54,7 +54,6 @@ import Data.Lens
 import Data.Lens.Index (class Index, ix)
 import Data.Lens.Indexed (positions)
 import Data.Maybe (Maybe(..), maybe)
-import Data.Monoid (class Monoid, mempty)
 import Data.Newtype (class Newtype, over, unwrap)
 import Data.Tuple (Tuple(..), snd)
 import Prelude

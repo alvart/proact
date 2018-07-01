@@ -3,60 +3,44 @@
 #### `ComponentT`
 
 ``` purescript
-type ComponentT s f w g m = ComponentT s s IOSync f w g m
+type ComponentT s f w g m = ComponentT s s Effect f w g m
 ```
 
 A type synonym for a React Component.
 
-#### `Dispatcher`
-
-``` purescript
-type Dispatcher s f m a = EventHandlerT s f m a -> ReactEff a
-```
-
-A type synonym for a dispatcher that is accessible from a React Component
-and that executes the actions of an event handler provided to it.
-
 #### `IndexedComponentT`
 
 ``` purescript
-type IndexedComponentT i s f w g m = ComponentT (Tuple i s) s IOSync f w g m
+type IndexedComponentT i s f w g m = ComponentT (Tuple i s) s Effect f w g m
 ```
 
 A type synonym for an Indexed React Component.
 
-#### `ReactEff`
-
-``` purescript
-type ReactEff = Eff (props :: ReactProps, refs :: ReactRefs ReadOnly, state :: ReactState ReadWrite)
-```
-
-A type synonym for effects coming from React elements.
-
 #### `dispatch`
 
 ``` purescript
-dispatch :: forall s1 s2 f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g IOSync => Lens' s1 s2 -> (ReactStoreT s1 w Unit -> f (ReactStoreT s1 w Unit)) -> ReactStoreT s1 w Unit -> ReactThis {  } s1 -> Dispatcher s2 g m Unit
+dispatch :: forall s1 s2 f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g Effect => Lens' {  | s1 } {  | s2 } -> (ReactStoreT {  | s1 } w Unit -> f (ReactStoreT {  | s1 } w Unit)) -> ReactStoreT {  | s1 } w Unit -> ReactThis {  } {  | s1 } -> EventHandlerT {  | s2 } g m Unit -> Effect Unit
 ```
 
 Dispatches React actions detached from the context of a Component. The
 state handled by the actions is seen through a given lens.
 
-#### `dispatcher`
+#### `dispatch'`
 
 ``` purescript
-dispatcher :: forall s t f w g m. Functor f => Functor g => Comonad w => Pairing w m => PairingM f g IOSync => Monad m => ComponentT s t IOSync f w g m (Dispatcher t g m Unit)
+dispatch' :: forall s f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g Effect => (ReactStoreT {  | s } w Unit -> f (ReactStoreT {  | s } w Unit)) -> ReactStoreT {  | s } w Unit -> ReactThis {  } {  | s } -> EventHandlerT {  | s } g m Unit -> Effect Unit
 ```
 
-Provides a dispatcher in the context of a React Component.
+Dispatches React actions detached from the context of a Component.
 
-#### `spec`
+#### `render`
 
 ``` purescript
-spec :: forall s e f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g IOSync => (ReactStoreT s w Unit -> f (ReactStoreT s w Unit)) -> ReactStoreT s w Unit -> ComponentT s f w g m ReactElement -> ReactSpec {  } s ReactElement e
+render :: forall s f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g Effect => (ReactStoreT {  | s } w Unit -> f (ReactStoreT {  | s } w Unit)) -> ReactStoreT {  | s } w Unit -> ComponentT {  | s } f w g m ReactElement -> ReactThis {  } {  | s } -> Effect ReactElement
 ```
 
-Creates a `ReactSpec` from a Coalgebra and a React Component.
+Renders a `ReactElement` from a React Context, a Coalgebra and a Proact
+Component.
 
 
 ### Re-exported from Proact:
@@ -111,4 +95,12 @@ focus :: forall s1 s2 n f w g m a. Functor f => Functor g => Comonad w => Monad 
 
 Changes a `ComponentT`'s state type through the lens of a `Traversal`.
 For a less restrictive albeit less general version, consider `focus'`.
+
+#### `dispatcher`
+
+``` purescript
+dispatcher :: forall s t n f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g n => Monad n => ComponentT s t n f w g m (EventHandlerT t g m Unit -> n Unit)
+```
+
+Provides an action dispatcher in the context of a Proact `ComponentT`.
 

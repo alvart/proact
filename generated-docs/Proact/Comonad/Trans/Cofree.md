@@ -29,7 +29,7 @@ Newtype (CofreeT f w a) _
 ComonadTrans (CofreeT f)
 (Functor f, Comonad w) => ComonadCofree f (CofreeT f w)
 (Functor f) => HoistT (CofreeT f)
-InterpretT (CofreeT)
+InterpretT CofreeT
 ```
 
 #### `coiterT`

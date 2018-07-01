@@ -6,78 +6,41 @@
 module Proact.React
   ( module ProactExports
   , ComponentT
-  , Dispatcher
   , IndexedComponentT
-  , ReactEff
   , dispatch
-  , dispatcher
-  , spec
+  , dispatch'
+  , render
   )
 where
 
 import Control.Comonad (class Comonad)
 import Control.Comonad.Store (StoreT(..), pos, seek)
-import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Class (liftEff)
-import Control.Monad.Eff.Unsafe (unsafeCoerceEff)
-import Control.Monad.IOSync (IOSync, runIOSync)
 import Data.Array (head, singleton)
 import Data.Lens (Lens')
 import Data.Maybe (Maybe(..), maybe)
 import Data.Tuple (Tuple(..))
+import Effect (Effect)
 import Prelude
 import Proact
-  ( ComponentT
-  , EventHandlerT
-  , VaultT(..)
-  , dispatch
-  , dispatcher
-  , focusVault
-  , render
-  ) as P
-import Proact (EventHandlerT(..), focus, focus', iFocus) as ProactExports
+  (ComponentT, EventHandlerT, VaultT(..), dispatch, focusVault, render) as P
+import Proact
+  (EventHandlerT(..), dispatcher, focus, focus', iFocus) as ProactExports
 import Proact.Functor.Pairing (class Pairing, class PairingM)
 import Proact.Comonad.Trans.Cofree (coiterT)
-import React
-  ( ReactSpec
-  , ReadOnly
-  , ReadWrite
-  , ReactElement
-  , ReactProps
-  , ReactRefs
-  , ReactState
-  , ReactThis
-  , readState
-  , spec
-  , spec'
-  , writeState
-  ) as React
+import React (ReactElement, ReactThis, writeState) as React
 import React.DOM (div') as React
-import Unsafe.Coerce (unsafeCoerce)
 
 -- | A type synonym for a React Component.
-type ComponentT s f w g m = P.ComponentT s s IOSync f w g m
-
--- | A type synonym for a dispatcher that is accessible from a React Component
--- | and that executes the actions of an event handler provided to it.
-type Dispatcher s f m a = P.EventHandlerT s f m a -> ReactEff a
+type ComponentT s f w g m = P.ComponentT s s Effect f w g m
 
 -- | A type synonym for an Indexed React Component.
-type IndexedComponentT i s f w g m = P.ComponentT (Tuple i s) s IOSync f w g m
-
--- | A type synonym for effects coming from React elements.
-type ReactEff =
-  Eff
-    ( props :: React.ReactProps
-    , refs :: React.ReactRefs React.ReadOnly
-    , state :: React.ReactState React.ReadWrite
-    )
+type IndexedComponentT i s f w g m = P.ComponentT (Tuple i s) s Effect f w g m
 
 -- | A type synonym for a `StoreT` containing the application's state.
-type ReactStoreT s w a = StoreT (Maybe s) w (IOSync a)
+type ReactStoreT s w a = StoreT (Maybe s) w (Effect a)
 
 -- A type synonym for a React state repository.
-type VaultT s f w = P.VaultT s IOSync f w
+type VaultT s f w = P.VaultT s Effect f w
 
 -- | Dispatches React actions detached from the context of a Component. The
 -- | state handled by the actions is seen through a given lens.
@@ -88,71 +51,80 @@ dispatch
   => Comonad w
   => Monad m
   => Pairing w m
-  => PairingM f g IOSync
-  => Lens' s1 s2
-  -> (ReactStoreT s1 w Unit -> f (ReactStoreT s1 w Unit))
-  -> ReactStoreT s1 w Unit
-  -> React.ReactThis { } s1
-  -> Dispatcher s2 g m Unit
-dispatch _lens iterator start this eventHandler =
-  do
-  let dispatchVault = P.focusVault _lens $ vault iterator start writeState
-  unsafeCoerceEff $ runIOSync $ P.dispatch dispatchVault eventHandler
-  where
-  writeState f s1 =
-    f s1 *> maybe (pure unit) (void <<< liftEff <<< React.writeState this) s1
+  => PairingM f g Effect
+  => Lens' { | s1 } { | s2 }
+  -> (ReactStoreT { | s1 } w Unit -> f (ReactStoreT { | s1 } w Unit))
+  -> ReactStoreT { | s1 } w Unit
+  -> React.ReactThis { } { | s1 }
+  -> P.EventHandlerT { | s2 } g m Unit
+  -> Effect Unit
+dispatch _lens = dispatch'' (P.focusVault _lens)
 
--- | Provides a dispatcher in the context of a React Component.
-dispatcher
-  :: forall s t f w g m
-   . Functor f
-  => Functor g
-  => Comonad w
-  => Pairing w m
-  => PairingM f g IOSync
-  => Monad m
-  => P.ComponentT s t IOSync f w g m (Dispatcher t g m Unit)
-dispatcher = map (unsafeCoerceEff <<< runIOSync) <$> P.dispatcher
-
--- | Creates a `ReactSpec` from a Coalgebra and a React Component.
-spec
-  :: forall s e f w g m
+-- | Dispatches React actions detached from the context of a Component.
+dispatch'
+  :: forall s f w g m
    . Functor f
   => Functor g
   => Comonad w
   => Monad m
   => Pairing w m
-  => PairingM f g IOSync
-  => (ReactStoreT s w Unit -> f (ReactStoreT s w Unit))
-  -> ReactStoreT s w Unit
-  -> ComponentT s f w g m React.ReactElement
-  -> React.ReactSpec { } s React.ReactElement e
-spec iterator start component =
+  => PairingM f g Effect
+  => (ReactStoreT { | s } w Unit -> f (ReactStoreT { | s } w Unit))
+  -> ReactStoreT { | s } w Unit
+  -> React.ReactThis { } { | s }
+  -> P.EventHandlerT { | s } g m Unit
+  -> Effect Unit
+dispatch' = dispatch'' identity
+
+-- | Renders a `ReactElement` from a React Context, a Coalgebra and a Proact
+-- | Component.
+render
+  :: forall s f w g m
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Pairing w m
+  => PairingM f g Effect
+  => (ReactStoreT { | s } w Unit -> f (ReactStoreT { | s } w Unit))
+  -> ReactStoreT { | s } w Unit
+  -> ComponentT { | s } f w g m React.ReactElement
+  -> React.ReactThis { } { | s }
+  -> Effect React.ReactElement
+render iterator start component this =
   case pos start
     of
-    Just state -> React.spec state render
-    Nothing ->
-      React.spec' (const $ pure $ unsafeCoerce unit)
-        $ const
-        $ pure
-        $ React.div' []
+    Just state ->
+      do
+      let start' = seek (Just state) start
+      let dispatchVault = vault iterator start' $ writeState this
+      let renderVault = vault iterator start' identity
+
+      map (maybe (React.div' [ ]) identity <<< head)
+        $ P.render renderVault dispatchVault
+        $ map singleton component
+    Nothing -> pure $ React.div' []
+
+-- Dispatches React actions detached from the context of a Component. The state
+-- handled by the React context is converted to a state type supported by the
+-- vault via a transformation function.
+dispatch''
+  :: forall s1 s2 f w g m
+   . Functor f
+  => Functor g
+  => Comonad w
+  => Monad m
+  => Pairing w m
+  => PairingM f g Effect
+  => (P.VaultT { | s1 } Effect f w Unit -> P.VaultT { | s2 } Effect f w Unit)
+  -> (ReactStoreT { | s1 } w Unit -> f (ReactStoreT { | s1 } w Unit))
+  -> ReactStoreT { | s1 } w Unit
+  -> React.ReactThis { } { | s1 }
+  -> P.EventHandlerT { | s2 } g m Unit
+  -> Effect Unit
+dispatch'' vaultStateConverter iterator start this = P.dispatch dispatchVault
   where
-  render this =
-    do
-    state <- unsafeCoerceEff $ React.readState this
-
-    let start' = seek (Just state) start
-    let renderVault = vault iterator start' id
-    let dispatchVault = vault iterator start' writeState
-
-    map (maybe (React.div' [ ]) id <<< head)
-      $ unsafeCoerceEff
-      $ runIOSync
-      $ P.render renderVault dispatchVault
-      $ map singleton component
-    where
-    writeState f s1 =
-      f s1 *> maybe (pure unit) (void <<< liftEff <<< React.writeState this) s1
+  dispatchVault = vaultStateConverter $ vault iterator start $ writeState this
 
 -- Builds a state repository.
 vault
@@ -161,7 +133,18 @@ vault
   => Comonad w
   => (ReactStoreT s w Unit -> f (ReactStoreT s w Unit))
   -> ReactStoreT s w Unit
-  -> ((Maybe s -> IOSync Unit) -> Maybe s -> IOSync Unit)
+  -> ((Maybe s -> Effect Unit) -> Maybe s -> Effect Unit)
   -> VaultT s f w Unit
 vault iterator (StoreT (Tuple w start)) _peek =
   P.VaultT $ coiterT iterator $ StoreT $ Tuple (map _peek w) start
+
+-- Extends the action of writing a state by also writing it into a React
+-- context.
+writeState
+  :: forall s
+   . React.ReactThis { } { | s }
+  -> (Maybe { | s } -> Effect Unit)
+  -> Maybe { | s }
+  -> Effect Unit
+writeState this f s =
+  f s *> maybe (pure unit) (void <<< React.writeState this) s

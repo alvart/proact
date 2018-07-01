@@ -17,7 +17,6 @@ where
 import Control.Apply (lift2)
 import Control.Monad.Trans.Class (class MonadTrans)
 import Data.Bifunctor (class Bifunctor, bimap)
-import Data.Monoid (class Monoid, mempty)
 import Data.Newtype (class Newtype, unwrap)
 import Prelude
 import Proact.Monad.Class.MonadFree (class MonadFree)

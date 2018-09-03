@@ -3,7 +3,7 @@
     "name": "Jon Alvart",
     "email": "code.alvart@gmail.com"
   },
-  "bugs": "https://github.com/alvart/proact/issues",
+  "bugs": "https://github.com/alvart/purescript-proact/issues",
   "dependencies": {
     "create-react-class": "^15.6.3",
     "purescript": "^0.12.0",
@@ -27,10 +27,10 @@
     "virtual-dom",
     "web framework"
   ],
-  "homepage": "https://github.com/alvart/proact.git",
+  "homepage": "https://github.com/alvart/purescript-proact.git",
   "license": "MIT",
   "name": "purescript-proact",
-  "repository": "https://github.com/alvart/proact.git",
+  "repository": "https://github.com/alvart/purescript-proact.git",
   "scripts": {
     "clean": "rimraf output && rimraf .pulp-cache",
     "build": "pulp build"

@@ -7,6 +7,7 @@ module Proact.React
   ( module ProactExports
   , ComponentT
   , IndexedComponentT
+  , ReactStoreT
   , dispatch
   , dispatch'
   , render
@@ -88,10 +89,10 @@ render
   => PairingM f g Effect
   => (ReactStoreT { | s } w Unit -> f (ReactStoreT { | s } w Unit))
   -> ReactStoreT { | s } w Unit
-  -> ComponentT { | s } f w g m React.ReactElement
   -> React.ReactThis { } { | s }
+  -> ComponentT { | s } f w g m React.ReactElement
   -> Effect React.ReactElement
-render iterator start component this =
+render iterator start this component =
   case pos start
     of
     Just state ->

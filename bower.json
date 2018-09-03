@@ -15,6 +15,6 @@
   "name": "proact",
   "repository": {
     "type": "git",
-    "url": "git://github.com/alvart/proact.git"
+    "url": "git://github.com/alvart/purescript-proact.git"
   }
 }

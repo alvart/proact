@@ -16,6 +16,14 @@ type IndexedComponentT i s f w g m = ComponentT (Tuple i s) s Effect f w g m
 
 A type synonym for an Indexed React Component.
 
+#### `ReactStoreT`
+
+``` purescript
+type ReactStoreT s w a = StoreT (Maybe s) w (Effect a)
+```
+
+A type synonym for a `StoreT` containing the application's state.
+
 #### `dispatch`
 
 ``` purescript
@@ -36,7 +44,7 @@ Dispatches React actions detached from the context of a Component.
 #### `render`
 
 ``` purescript
-render :: forall s f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g Effect => (ReactStoreT {  | s } w Unit -> f (ReactStoreT {  | s } w Unit)) -> ReactStoreT {  | s } w Unit -> ComponentT {  | s } f w g m ReactElement -> ReactThis {  } {  | s } -> Effect ReactElement
+render :: forall s f w g m. Functor f => Functor g => Comonad w => Monad m => Pairing w m => PairingM f g Effect => (ReactStoreT {  | s } w Unit -> f (ReactStoreT {  | s } w Unit)) -> ReactStoreT {  | s } w Unit -> ReactThis {  } {  | s } -> ComponentT {  | s } f w g m ReactElement -> Effect ReactElement
 ```
 
 Renders a `ReactElement` from a React Context, a Coalgebra and a Proact

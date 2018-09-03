@@ -7,7 +7,7 @@ A web framework using `purescipt-react` is provided in this package.
 
 ## Installation
 ```sh
-git clone https://github.com/alvart/proact.git proact
+git clone https://github.com/alvart/purescript-proact.git proact
 cd proact
 npm install
 bower install

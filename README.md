@@ -31,7 +31,7 @@ Creating components in Proact is meant to be quick and simple:
 
 Optionally, if while rendering a component or triggering an event action a side-effect is required, the component will need a Free definition for this action which can be provided specifically in a type or generically by a type class.
 
-Once you're app components are defined, integrate them simply and elegantly by `focus`ing on them from their parent component. Focusing requires lens functions which are usually very easy to implement for most state types.
+Once your app components are defined, integrate them simply and elegantly by `focus`ing on them from their parent component. Focusing requires lens functions which are usually very easy to implement for most state types.
 
 ## Examples
 
